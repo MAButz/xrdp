@@ -156,6 +156,10 @@ struct enc_info
     int rc_mode;         /* VA_RC_CQP or VA_RC_VBR */
     int bitrate_kbps;    /* XRDP_VAAPI_BITRATE, 0 = CQP */
     int use_ltr;         /* 1 = aux pictures are long-term references */
+    /* 1 = BOTH views are long-term references on disjoint LongTermFrameIdx,
+       and every slice names its own reference explicitly. See the reference
+       structure comment in create_encoder. */
+    int dual_ltr;
 
     /* GL -> dma-buf export, one per view */
     EGLImageKHR egl_image[2];
@@ -194,6 +198,11 @@ struct enc_info
     enum encoder_result pending_rv[2];
     int have_ltr;                  /* is ltr_pic valid */
     VAPictureH264 ltr_pic;         /* the previous aux picture, LongTermFrameIdx 0 */
+    /* Dual-LTR only: each view's own previous picture, held long-term.
+       LongTermFrameIdx is the view index -- main 0, aux 1 -- so the index a
+       slice names is the view it belongs to. */
+    int have_ltrv[2];
+    VAPictureH264 ltrv[2];
 };
 
 /* ------------------------------------------------------------------------ */
@@ -546,12 +555,23 @@ build_pps(unsigned char *out, struct enc_info *ei)
    previous picture where it needs it: index 0 for the main view, index 1
    for the aux.
 
+   Under dual_ltr the caller passes ref_lt_idx >= 0 instead, and the list is
+   built by naming that long-term picture rather than inheriting the default
+   order. For frame coding LongTermPicNum equals LongTermFrameIdx (8.2.4.1),
+   so the index the caller holds is the number that goes on the wire.
+   ref_lt_idx < 0 means the classic path above.
+
+   cur_lt_idx is the LongTermFrameIdx this picture claims when is_ltr; the
+   ceiling that goes with it covers both views, so marking one view's picture
+   long-term never evicts the other's.
+
    Returns the length in BITS. A slice header does not end byte-aligned and
    carries no rbsp_trailing_bits; the driver continues from here. */
 static int
 build_slice_header(unsigned char *out, struct enc_info *ei, int is_idr,
                    int is_ref, int is_ltr, int slice_type, int nref,
-                   int qp, int deblock_idc, int idr_pic_id)
+                   int qp, int deblock_idc, int idr_pic_id,
+                   int ref_lt_idx, int cur_lt_idx)
 {
     unsigned char rbsp[64];
     struct bitstream b;
@@ -575,27 +595,49 @@ build_slice_header(unsigned char *out, struct enc_info *ei, int is_idr,
     {
         bs_put(&b, 1, 1);              /* num_ref_idx_active_override_flag */
         bs_ue(&b, (nref > 0 ? nref : 1) - 1);
-        bs_put(&b, 1, 0);              /* ref_pic_list_modification_flag_l0 */
+        if (ref_lt_idx >= 0)
+        {
+            /* Name the one picture this slice predicts from. With one active
+               entry the modification process puts it at index 0 and the list
+               ends there, so nothing else -- including a picture a decoder
+               inferred for a frame_num the auxiliary view took with it -- can
+               be reached from this slice. */
+            bs_put(&b, 1, 1);          /* ref_pic_list_modification_flag_l0 */
+            bs_ue(&b, 2);              /* idc 2: long_term_pic_num follows */
+            bs_ue(&b, ref_lt_idx);     /* LongTermPicNum */
+            bs_ue(&b, 3);              /* idc 3: end of the list */
+        }
+        else
+        {
+            bs_put(&b, 1, 0);          /* ref_pic_list_modification_flag_l0 */
+        }
     }
     if (is_ref)
     {
         if (is_idr)
         {
             bs_put(&b, 1, 0);          /* no_output_of_prior_pics_flag */
-            bs_put(&b, 1, 0);          /* long_term_reference_flag */
+            /* An IDR marks itself long-term through this flag rather than an
+               MMCO, and always takes LongTermFrameIdx 0. Under dual_ltr that
+               is the main view's index, which is what the IDR is: the head of
+               the main chain, and the picture the first auxiliary view of the
+               sequence predicts from. */
+            bs_put(&b, 1, is_ltr ? 1 : 0); /* long_term_reference_flag */
         }
         else if (is_ltr)
         {
-            /* Mark this picture long-term with LongTermFrameIdx 0, replacing
-               whichever aux held it. MMCO 4 comes first because every IDR
-               resets MaxLongTermFrameIdx to "none" and MMCO 6 is only legal
-               once it is set. Re-sending it on every aux is idempotent: it
-               evicts long-term indices above 0, and 0 is the only one used. */
+            /* Mark this picture long-term with cur_lt_idx, replacing whichever
+               picture of this view held it. MMCO 4 comes first because every
+               IDR resets MaxLongTermFrameIdx to "none" and MMCO 6 is only
+               legal once it is set. Re-sending it on every picture is
+               idempotent: it evicts long-term indices above the ceiling, and
+               the ceiling covers every index in use -- one view's marking must
+               not evict the other view's chain. */
             bs_put(&b, 1, 1);          /* adaptive_ref_pic_marking_mode_flag */
             bs_ue(&b, 4);              /* MMCO 4 */
-            bs_ue(&b, 1);              /* max_long_term_frame_idx_plus1 = 1 */
+            bs_ue(&b, ei->dual_ltr ? 2 : 1); /* max_long_term_frame_idx_plus1 */
             bs_ue(&b, 6);              /* MMCO 6: mark current long-term */
-            bs_ue(&b, 0);              /* long_term_frame_idx = 0 */
+            bs_ue(&b, cur_lt_idx);     /* long_term_frame_idx */
             bs_ue(&b, 0);              /* MMCO 0: end of list */
         }
         else
@@ -1114,12 +1156,66 @@ xrdp_accel_assist_vaapi_create_encoder(int width, int height, int tex,
         }
     }
 
+    /* Dual long-term references: the main view gets a long-term chain of its
+       own, on LongTermFrameIdx 0, beside the aux view's on index 1, and every
+       slice names the picture it predicts from with a
+       ref_pic_list_modification rather than taking the default list.
+
+       This is not about compression -- it encodes the same pictures from the
+       same references as the single-LTR scheme above. It is about making the
+       auxiliary view DROPPABLE, so a client that will not recombine the two
+       views can discard the chroma half on the wire instead of decoding it
+       and throwing the result away (rustguac does exactly this, and half the
+       H.264 traffic is the aux view).
+
+       Dropping access units out of a shared sequence is only safe if nothing
+       that survives can refer to them, and under the default-list scheme
+       nothing guarantees that:
+
+         - Main slices activate two entries, because the AUX slices need two
+           to reach their own chain, and the list is shared. The hardware
+           motion search picks its own view at index 1 for essentially every
+           macroblock, but "essentially" is not a guarantee, and a main
+           macroblock that does pick index 0 predicts from a picture the
+           client no longer has.
+
+         - Worse, and independent of that: dropping a reference picture
+           leaves holes in frame_num, so the client must set
+           gaps_in_frame_num_value_allowed_flag to keep the stream legal --
+           and that obliges a decoder to INFER the missing pictures (8.2.5.2)
+           and insert them as SHORT-TERM references. The default P list is
+           short-term by descending PicNum first, so an inferred picture
+           lands at index 0 and shifts the whole list by one. Every main
+           picture that follows a dropped aux then predicts from a fabricated
+           frame. Truncating the list to one entry does not help; it pins
+           main to the fabricated frame instead.
+
+       Naming the reference by long_term_pic_num closes both: inferred
+       pictures are short-term and can never be named, and each view's list is
+       one entry that provably cannot reach the other view. It costs a handful
+       of bits per slice header and removes the per-macroblock ref_idx bit
+       from main slices, which is a small win rather than a cost.
+
+       It needs the aux to be long-term already (use_ltr), our own slice
+       headers (implied by use_ltr), and a reference aux (not single_ref).
+
+       iHD ignores ref_pic_list_modification when it generates headers itself,
+       which is why the scheme above avoided it -- but we write the header, and
+       the driver predicts from whatever surface sits in RefPicList0[0]. The
+       two agree as long as the header names the picture that surface holds,
+       which is what the encode path below does.
+
+       XRDP_AVC444_DUAL_LTR=0 falls back to the single-LTR scheme. */
+    qp_str = g_getenv("XRDP_AVC444_DUAL_LTR");
+    lei->dual_ltr = lei->use_ltr && (lei->nviews > 1) && !lei->single_ref &&
+                    !(qp_str != NULL && g_atoi(qp_str) == 0);
+
     LOG(LOG_LEVEL_INFO, "vaapi: encoder %dx%d, %d view(s), QP %d/%d, "
         "chroma_qp_index_offset %d, deblock %d/%d, single_ref %d, ltr %d, "
-        "packed_slice %d, rc %s, bitrate %d kbit/s, level %d",
+        "dual_ltr %d, packed_slice %d, rc %s, bitrate %d kbit/s, level %d",
         width, height, lei->nviews, lei->qp_view[0], lei->qp_view[1],
         lei->chroma_qp_offset, lei->deblock_view[0], lei->deblock_view[1],
-        lei->single_ref, lei->use_ltr, g_packed_slice,
+        lei->single_ref, lei->use_ltr, lei->dual_ltr, g_packed_slice,
         lei->rc_mode == VA_RC_CQP ? "CQP" : "VBR",
         lei->bitrate_kbps, h264_level_for(width, height));
 
@@ -1471,6 +1567,9 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     int nref;
     int is_ref;
     int is_ltr;
+    int cur_lt_idx;  /* LongTermFrameIdx this picture claims, if is_ltr */
+    int ref_lt_idx;  /* LongTermFrameIdx it predicts from, -1 = default list */
+    int force_intra; /* code as a non-IDR I picture: no reference list at all */
 
     /* AVC444 puts both views in ONE H.264 sequence, because the client
        decodes both bitstreams with a single decoder: FreeRDP's
@@ -1518,6 +1617,8 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         ei->have_ref[1] = 0;
         ei->ndpb = 0;
         ei->have_ltr = 0;
+        ei->have_ltrv[0] = 0;
+        ei->have_ltrv[1] = 0;
     }
     idr_id_used = ei->idr_pic_id;
 
@@ -1530,8 +1631,39 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     is_ref = (view == 0) || (ei->nviews < 2) || !ei->single_ref;
     /* The aux view is the long-term reference; the main view stays
        short-term so its own previous picture is the head of the default L0
-       list. */
-    is_ltr = is_ref && (view == 1) && (ei->nviews > 1) && ei->use_ltr;
+       list. Under dual_ltr both views are long-term, on an index of their
+       own, and the short-term DPB is never used at all -- including for the
+       IDR, which is the head of the main view's chain. */
+    is_ltr = is_ref && (ei->nviews > 1) && ei->use_ltr &&
+             (ei->dual_ltr || (view == 1));
+    cur_lt_idx = ei->dual_ltr ? view : 0;
+    /* Which long-term picture this one predicts from. Its own, once its chain
+       exists; before that -- the first auxiliary view of a sequence -- the
+       IDR, which is the main chain's first picture. */
+    ref_lt_idx = -1;
+    force_intra = 0;
+    if (ei->dual_ltr && !is_idr)
+    {
+        if (ei->have_ltrv[view])
+        {
+            ref_lt_idx = view;
+        }
+        else
+        {
+            /* No chain of its own yet: the first auxiliary picture of a
+               sequence. The single-LTR scheme has it predict from the main
+               IDR, which is close to worthless anyway -- luma against packed
+               chroma cost 18x on the measurements in create_encoder -- and
+               here it would be actively wrong, because naming main's
+               long-term index from an auxiliary slice is exactly the overlap
+               a downstream dropper looks for to decide the two chains are NOT
+               separate. Code it intra instead: one I picture per IDR, no
+               reference list to get wrong, and the chains stay disjoint from
+               the first picture of each. It is a plain I slice, not an IDR,
+               so it resets nothing that the main chain depends on. */
+            force_intra = 1;
+        }
+    }
 
     g_memset(&curr, 0, sizeof(curr));
     if (!is_ref)
@@ -1549,9 +1681,10 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         curr.picture_id = ei->recon_surfaces[ei->cur_recon];
     }
     /* For a long-term reference frame_idx carries LongTermFrameIdx, not
-       frame_num. One long-term index is enough: each new aux replaces the
-       previous one. */
-    curr.frame_idx = is_ltr ? 0 : ei->frame_num;
+       frame_num. One long-term index is enough for the single-LTR scheme:
+       each new aux replaces the previous one. Under dual_ltr the index is
+       the view, so each view replaces its own. */
+    curr.frame_idx = is_ltr ? cur_lt_idx : ei->frame_num;
     curr.flags = is_ltr ? VA_PICTURE_H264_LONG_TERM_REFERENCE
                         : (is_ref ? VA_PICTURE_H264_SHORT_TERM_REFERENCE : 0);
     curr.TopFieldOrderCnt = ei->poc;
@@ -1676,8 +1809,10 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         pic.ReferenceFrames[i].flags = VA_PICTURE_H264_INVALID;
     }
     /* The DPB as the driver must model it: every short-term reference still
-       live, most recent first. Distinct from RefPicList0 below, which picks
-       which one this picture actually predicts from. */
+       live, most recent first, then the long-term ones. Distinct from
+       RefPicList0 below, which picks which one this picture actually predicts
+       from. Under dual_ltr ndpb is always 0 and both entries are long-term --
+       one per view. */
     nref = 0;
     for (i = 0; i < ei->ndpb; i++)
     {
@@ -1686,6 +1821,13 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     if (ei->have_ltr)
     {
         pic.ReferenceFrames[nref++] = ei->ltr_pic;
+    }
+    for (i = 0; ei->dual_ltr && i < 2; i++)
+    {
+        if (ei->have_ltrv[i])
+        {
+            pic.ReferenceFrames[nref++] = ei->ltrv[i];
+        }
     }
     pic.coded_buf = ei->coded_buf[view];
     pic.pic_parameter_set_id = 0;
@@ -1728,7 +1870,7 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     slice.macroblock_address = 0;
     slice.num_macroblocks = w_mbs * h_mbs;
     slice.macroblock_info = VA_INVALID_ID;
-    slice.slice_type = is_idr ? 2 : 0; /* I : P */
+    slice.slice_type = (is_idr || force_intra) ? 2 : 0; /* I : P */
     slice.pic_parameter_set_id = 0;
     slice.idr_pic_id = idr_id_used;
     slice.pic_order_cnt_lsb = 0;       /* pic_order_cnt_type 2: unused */
@@ -1742,7 +1884,16 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     }
     /* Which picture this one predicts from. */
     nref = 0;
-    if (!is_idr)
+    if (ref_lt_idx >= 0)
+    {
+        /* dual_ltr: one entry, the long-term picture of this view's own chain
+           (or the IDR, before that chain exists). The packed slice header
+           names the same picture by long_term_pic_num, so the driver's list
+           and the decoder's are the same list of one -- and a macroblock has
+           no second index to reach the other view with. */
+        slice.RefPicList0[nref++] = ei->ltrv[ref_lt_idx];
+    }
+    else if (!is_idr)
     {
         /* Default L0 order for a P slice: short-term references by
            descending PicNum, then long-term by ascending LongTermPicNum.
@@ -1759,7 +1910,7 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
             slice.RefPicList0[nref++] = ei->ltr_pic;
         }
     }
-    if (nref == 0 && !is_idr)
+    if (nref == 0 && slice.slice_type != 2)
     {
         LOG(LOG_LEVEL_WARNING, "vaapi: P picture with no reference, "
             "forcing intra");
@@ -1789,7 +1940,7 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         int sh_bits = build_slice_header(sh, ei, is_idr, is_ref, is_ltr,
                                          slice.slice_type, nref, qp,
                                          slice.disable_deblocking_filter_idc,
-                                         idr_id_used);
+                                         idr_id_used, ref_lt_idx, cur_lt_idx);
         if (render_packed_bits(ei->context, VAEncPackedHeaderSlice, sh,
                                sh_bits, 0, track, &ntrack) != 0)
         {
@@ -1822,15 +1973,34 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
        reference picture reuses this frame_num. */
     if (is_ltr)
     {
-        /* Replaces the previous long-term aux. It does not enter the
-           short-term DPB -- long-term references are exempt from the sliding
-           window, which is the whole point -- but frame_num still advances,
-           since this is a reference picture. */
+        /* Replaces the previous long-term picture of this view. It does not
+           enter the short-term DPB -- long-term references are exempt from
+           the sliding window, which is the whole point -- but frame_num still
+           advances, since this is a reference picture. */
         ei->ref_pic[view] = curr;
         ei->have_ref[view] = 1;
-        ei->ltr_pic = curr;
-        ei->have_ltr = 1;
-        ei->cur_recon_aux ^= 1;
+        if (ei->dual_ltr)
+        {
+            ei->ltrv[cur_lt_idx] = curr;
+            ei->have_ltrv[cur_lt_idx] = 1;
+        }
+        else
+        {
+            ei->ltr_pic = curr;
+            ei->have_ltr = 1;
+        }
+        /* Same ping-pong rule as the short-term path below: each view writes
+           its new picture to the surface its own previous one does not hold.
+           Under dual_ltr this runs for the main view too, where it is
+           cur_recon rather than cur_recon_aux. */
+        if ((view == 1) && (ei->nviews > 1))
+        {
+            ei->cur_recon_aux ^= 1;
+        }
+        else
+        {
+            ei->cur_recon ^= 1;
+        }
         ei->frame_num = (ei->frame_num + 1) & 15;
     }
     else if (is_ref)
