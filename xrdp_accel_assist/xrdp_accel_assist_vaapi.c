@@ -365,10 +365,45 @@ h264_level_for(int width, int height)
 }
 
 /*****************************************************************************/
+/* How many reference frames the stream declares.
+
+   One per view is all this encoder ever holds: each view predicts from its own
+   previous picture and nothing else.
+
+   Dual-LTR declares one more than it uses, and the spare is not slack. Both of
+   its slots are LONG-TERM, and a client that drops the auxiliary view leaves a
+   hole in frame_num wherever a dropped picture consumed one. With
+   gaps_in_frame_num_value_allowed_flag set -- which such a client must set to
+   keep the stream legal -- H.264 8.2.5.2 obliges the decoder to infer a frame
+   for every hole and hold it as a SHORT-TERM reference. The sliding window
+   (8.2.5.3) can only evict short-term pictures, and with two long-term slots
+   and a ceiling of two there is no short-term picture to evict and nowhere to
+   put the inferred one: the decoder fails outright rather than degrading.
+   Measured 2026-09-12: 212 ms from the first dropped picture to a terminal
+   decode error, then a rebuilt decoder starving for a keyframe an idle desktop
+   never sends -- a permanent freeze, with no corrupted picture to point at.
+
+   A Windows host survives the same treatment only because it declares three.
+   That is the entire difference between the two hosts, and it is why both pass
+   a separate-chains reference test and only one can actually be dropped.
+
+   Nothing is spent on a client that does not drop: the third slot is declared,
+   never filled, and the encoder's own DPB is unchanged. */
+static int
+xrdp_accel_assist_vaapi_num_ref(struct enc_info *ei)
+{
+    if (ei->nviews < 2 || ei->single_ref)
+    {
+        return 1;
+    }
+    return ei->dual_ltr ? 3 : 2;
+}
+
+/*****************************************************************************/
 static int
 build_sps(unsigned char *out, struct enc_info *ei)
 {
-    int num_ref = (ei->nviews > 1 && !ei->single_ref) ? 2 : 1;
+    int num_ref = xrdp_accel_assist_vaapi_num_ref(ei);
 
     unsigned char rbsp[256];
     struct bitstream b;
@@ -406,8 +441,9 @@ build_sps(unsigned char *out, struct enc_info *ei)
     }
     bs_ue(&b, 0);                  /* log2_max_frame_num_minus4 */
     bs_ue(&b, 2);                  /* pic_order_cnt_type = 2 */
-    /* Must match seq.max_num_ref_frames below. Only reference pictures count;
-       interleaved AVC444 keeps the previous picture of each view. */
+    /* Must match seq.max_num_ref_frames below. See
+       xrdp_accel_assist_vaapi_num_ref() for why dual-LTR declares a slot it
+       never fills. */
     bs_ue(&b, num_ref);            /* max_num_ref_frames */
     bs_put(&b, 1, 0);              /* gaps_in_frame_num_value_allowed_flag */
     bs_ue(&b, w_mbs - 1);          /* pic_width_in_mbs_minus1 */
@@ -438,9 +474,10 @@ build_sps(unsigned char *out, struct enc_info *ei)
        instant it is decoded.
 
        max_dec_frame_buffering must track max_num_ref_frames: H.264 E.2.1
-       requires max_dec_frame_buffering >= max_num_ref_frames. Leaving it
-       pinned at 1 while interleaved AVC444 raised max_num_ref_frames to 2
-       made the stream non-conforming. Lenient decoders (mstsc, libavcodec)
+       requires max_dec_frame_buffering >= max_num_ref_frames, so it comes from
+       the same count and rises with it. Leaving it pinned at 1 while
+       interleaved AVC444 raised max_num_ref_frames to 2 made the stream
+       non-conforming. Lenient decoders (mstsc, libavcodec)
        ignore the contradiction; a strict one that sizes its DPB from the VUI
        -- Chrome's WebCodecs, which is what the guacd H.264 passthrough feeds
        -- produces no output at all, which renders as a white screen. */
@@ -1205,6 +1242,10 @@ xrdp_accel_assist_vaapi_create_encoder(int width, int height, int tex,
        two agree as long as the header names the picture that surface holds,
        which is what the encode path below does.
 
+       Droppability needs one more thing than a safe reference structure: the
+       stream must declare a reference slot for the pictures a dropping client
+       leaves missing. See xrdp_accel_assist_vaapi_num_ref().
+
        XRDP_AVC444_DUAL_LTR=0 falls back to the single-LTR scheme. */
     qp_str = g_getenv("XRDP_AVC444_DUAL_LTR");
     lei->dual_ltr = lei->use_ltr && (lei->nviews > 1) && !lei->single_ref &&
@@ -1711,8 +1752,7 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         seq.intra_idr_period = 0;
         seq.ip_period = 1;          /* IPPP, no B frames */
         seq.bits_per_second = ei->bitrate_kbps * 1000; /* 0 under CQP */
-        seq.max_num_ref_frames =
-            (ei->nviews > 1 && !ei->single_ref) ? 2 : 1;
+        seq.max_num_ref_frames = xrdp_accel_assist_vaapi_num_ref(ei);
         seq.picture_width_in_mbs = w_mbs;
         seq.picture_height_in_mbs = h_mbs;
         seq.seq_fields.bits.chroma_format_idc = 1;
