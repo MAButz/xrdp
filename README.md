@@ -234,6 +234,7 @@ All of these are `[SessionVariables]` in `sesman.ini`, documented there as well:
 | `XRDP_USE_ACCEL_ASSIST` | off | required for any of the below |
 | `XRDP_ACCEL_AVC444` | negotiated | `0` forces AVC420; otherwise follows what the client advertised |
 | `XRDP_AVC444_CHROMA_INTERVAL` | 4 | frames between auxiliary (chroma) pictures |
+| `XRDP_AVC444_CHROMA_MAX_MS` | 200 | upper bound on chroma staleness; `0` for frame counting only |
 | `XRDP_AVC444_DUAL_LTR` | on | per-view long-term chains; `0` for the shared default list |
 | `XRDP_VAAPI_QP` / `_AUX_QP` | 26 | constant quantiser, 1-51 |
 | `XRDP_VAAPI_BITRATE` | 0 (CQP) | kbit/s; switches to VBR |

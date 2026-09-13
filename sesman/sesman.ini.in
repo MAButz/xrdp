@@ -275,9 +275,16 @@ PULSE_SCRIPT=@sesmansysconfdir@/pulse/default.pa
 ; How often the auxiliary chroma picture is sent, in frames. 1 sends it every
 ; frame, which is correct but roughly doubles the encode cost. Higher values
 ; refresh chroma less often; luma still updates every frame, so the cost is
-; brief colour lag on fast motion. 8 measured far smoother than 1 with no
-; visible penalty on desktop content.
-;XRDP_AVC444_CHROMA_INTERVAL=8
+; brief colour lag on fast motion.
+;XRDP_AVC444_CHROMA_INTERVAL=4
+; Upper bound on that colour lag, in milliseconds. The interval above is a
+; rate limit, not a deadline: frames are damage-driven, so a quiet desktop
+; emitting a frame a second stretches "every fourth frame" to four seconds,
+; and a change is then drawn with chroma from seconds earlier. The auxiliary
+; picture also goes out whenever this long has passed since the last one.
+; During motion the interval always fires first and this costs nothing. Set
+; to 0 to disable the deadline and count frames only.
+;XRDP_AVC444_CHROMA_MAX_MS=200
 ; Constant quantiser, 1-51. Lower is better quality and more bits. 26 is a
 ; reasonable desktop default. The auxiliary view carries chroma in its luma
 ; plane, so it gets its own value.

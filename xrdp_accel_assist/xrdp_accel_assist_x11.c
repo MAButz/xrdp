@@ -178,6 +178,13 @@ struct mon_info
        give up and render everything. */
     int aux_dirty;                /* 0 = nothing accumulated */
     int aux_x1, aux_y1, aux_x2, aux_y2;
+    /* When the aux view last went out, monotonic ms. The frame counter alone
+       cannot bound chroma staleness because frames are damage-driven and not
+       evenly spaced: at an idle rate of about one frame a second, "every
+       fourth frame" is every four seconds, and measured gaps here reached 63.
+       See xrdp_accel_assist_x11_chroma_max_ms(). */
+    unsigned int aux_last_ms;
+    int aux_last_valid;           /* 0 until the first aux frame */
     int tex_format;
     GLfloat *(*get_vertices)(GLuint *vertices_bytes,
                              GLuint *vertices_pointes,
@@ -933,6 +940,42 @@ xrdp_accel_assist_x11_chroma_interval(void)
     return interval;
 }
 
+/* Upper bound on chroma staleness, in milliseconds.
+
+   The frame interval above is a rate limit, not a deadline. It works while
+   frames are dense -- during video, "every fourth frame" is a few tens of
+   milliseconds -- but the pipeline is damage-driven, so a quiet desktop
+   emits frames a second or more apart and the same rule stretches the aux
+   gap to seconds. A frame is only sent because something changed, so those
+   are real changes drawn with chroma from up to a minute earlier: the luma
+   edge appears at once and the colour arrives long after.
+
+   So the aux also goes out whenever this much time has passed since the last
+   one. During motion the frame counter always fires first and this costs
+   nothing; when the session is quiet it bounds the lag, which is exactly
+   when there is bandwidth to spare. 200 ms is about the point where a colour
+   settling late stops reading as a delay. 0 disables the deadline and
+   restores pure frame counting. */
+static int
+xrdp_accel_assist_x11_chroma_max_ms(void)
+{
+    static int max_ms = -1;
+    const char *env;
+
+    if (max_ms < 0)
+    {
+        env = g_getenv("XRDP_AVC444_CHROMA_MAX_MS");
+        max_ms = (env != NULL) ? g_atoi(env) : 200;
+        if (max_ms < 0)
+        {
+            max_ms = 0;
+        }
+        LOG(LOG_LEVEL_INFO, "xrdp_accel_assist_x11: AVC444 chroma deadline "
+            "%d ms (0 = off, frame interval only)", max_ms);
+    }
+    return max_ms;
+}
+
 /*****************************************************************************/
 int
 xrdp_accel_assist_x11_create_pixmap(int width, int height, int magic,
@@ -998,6 +1041,8 @@ xrdp_accel_assist_x11_create_pixmap(int width, int height, int magic,
         /* A new surface holds nothing, so the accumulated damage box from a
            previous one means nothing either. */
         mi->aux_dirty = 0;
+        mi->aux_last_valid = 0;
+        mi->aux_last_ms = 0;
         mi->avc444 = xrdp_accel_assist_x11_avc444_enabled();
         mi->avc444_v2 = mi->avc444 && xrdp_accel_assist_x11_avc444_v2();
         /* v2's aux plane is split into a U half and a V half at half the
@@ -1533,6 +1578,8 @@ xrdp_accel_assist_x11_encode_pixmap(int left, int top, int width, int height,
         int aux_i;
         int aux_stage;
         unsigned int t_copy;
+        unsigned int now_ms;
+        int max_ms;
 
         if (idr_period < 0)
         {
@@ -1559,9 +1606,23 @@ xrdp_accel_assist_x11_encode_pixmap(int left, int top, int width, int height,
         }
 
         /* Decide up front whether this frame carries chroma, so both views
-           can be submitted before either is waited on. */
+           can be submitted before either is waited on.
+
+           Either trigger is enough: the frame interval caps the picture rate
+           while frames are dense, the deadline caps the chroma lag while they
+           are sparse. */
+        now_ms = g_get_elapsed_ms();
+        max_ms = xrdp_accel_assist_x11_chroma_max_ms();
         send_aux = ((frame_no % xrdp_accel_assist_x11_chroma_interval()) == 0)
-                   || ((flags & XH_ENC_FLAGS_FORCEIDR) != 0);
+                   || ((flags & XH_ENC_FLAGS_FORCEIDR) != 0)
+                   || (max_ms > 0 && (!mi->aux_last_valid
+                                      || now_ms - mi->aux_last_ms
+                                         >= (unsigned int) max_ms));
+        if (send_aux)
+        {
+            mi->aux_last_ms = now_ms;
+            mi->aux_last_valid = 1;
+        }
 
         /* main view -> enc_texture (MV shader) */
         if (frame_no < xrdp_accel_assist_x11_dump_frames())
