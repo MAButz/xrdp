@@ -203,6 +203,9 @@ struct enc_info
        slice names is the view it belongs to. */
     int have_ltrv[2];
     VAPictureH264 ltrv[2];
+    /* Dual-LTR only: has this sequence already raised MaxLongTermFrameIdx?
+       See the MMCO 4 comment in build_slice_header(). */
+    int lt_max_sent;
 };
 
 /* ------------------------------------------------------------------------ */
@@ -608,7 +611,7 @@ static int
 build_slice_header(unsigned char *out, struct enc_info *ei, int is_idr,
                    int is_ref, int is_ltr, int slice_type, int nref,
                    int qp, int deblock_idc, int idr_pic_id,
-                   int ref_lt_idx, int cur_lt_idx)
+                   int ref_lt_idx, int cur_lt_idx, int send_lt_max)
 {
     unsigned char rbsp[64];
     struct bitstream b;
@@ -664,15 +667,31 @@ build_slice_header(unsigned char *out, struct enc_info *ei, int is_idr,
         else if (is_ltr)
         {
             /* Mark this picture long-term with cur_lt_idx, replacing whichever
-               picture of this view held it. MMCO 4 comes first because every
-               IDR resets MaxLongTermFrameIdx to "none" and MMCO 6 is only
-               legal once it is set. Re-sending it on every picture is
-               idempotent: it evicts long-term indices above the ceiling, and
-               the ceiling covers every index in use -- one view's marking must
+               picture of this view held it.
+
+               MMCO 4 raises MaxLongTermFrameIdx, which MMCO 6 needs set before
+               it can assign an index, and which every IDR resets to "none". It
+               is a property of the sequence, not of a picture: nothing in this
+               stream lowers it again, so once per sequence is all it takes, and
+               send_lt_max says whether this is that once.
+
+               It used to go out with every marking, as a belt against one being
+               lost -- cheap when only the auxiliary view marked, one frame in
+               four. Under dual-LTR every picture marks, so that belt was being
+               re-tied four times as often on the index space the auxiliary
+               view's chain lives in, for a risk that does not exist over TCP.
+               A decoder that evicts on >= the ceiling rather than > it would
+               drop the auxiliary chain, and since the auxiliary view is never
+               an IDR nothing would ever bring it back.
+
+               The ceiling covers every index in use -- one view's marking must
                not evict the other view's chain. */
             bs_put(&b, 1, 1);          /* adaptive_ref_pic_marking_mode_flag */
-            bs_ue(&b, 4);              /* MMCO 4 */
-            bs_ue(&b, ei->dual_ltr ? 2 : 1); /* max_long_term_frame_idx_plus1 */
+            if (send_lt_max)
+            {
+                bs_ue(&b, 4);          /* MMCO 4 */
+                bs_ue(&b, ei->dual_ltr ? 2 : 1); /* max_long_term_frame_idx_plus1 */
+            }
             bs_ue(&b, 6);              /* MMCO 6: mark current long-term */
             bs_ue(&b, cur_lt_idx);     /* long_term_frame_idx */
             bs_ue(&b, 0);              /* MMCO 0: end of list */
@@ -1611,6 +1630,7 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     int cur_lt_idx;  /* LongTermFrameIdx this picture claims, if is_ltr */
     int ref_lt_idx;  /* LongTermFrameIdx it predicts from, -1 = default list */
     int force_intra; /* code as a non-IDR I picture: no reference list at all */
+    int send_lt_max; /* emit MMCO 4, raising MaxLongTermFrameIdx for the sequence */
 
     /* AVC444 puts both views in ONE H.264 sequence, because the client
        decodes both bitstreams with a single decoder: FreeRDP's
@@ -1660,6 +1680,7 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         ei->have_ltr = 0;
         ei->have_ltrv[0] = 0;
         ei->have_ltrv[1] = 0;
+        ei->lt_max_sent = 0;
     }
     idr_id_used = ei->idr_pic_id;
 
@@ -1678,6 +1699,10 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     is_ltr = is_ref && (ei->nviews > 1) && ei->use_ltr &&
              (ei->dual_ltr || (view == 1));
     cur_lt_idx = ei->dual_ltr ? view : 0;
+    /* The single-LTR scheme keeps re-sending it, as it always has; dual-LTR
+       sends it once per sequence. The flag is only set once the picture has
+       actually been submitted, so a failed encode does not consume it. */
+    send_lt_max = !ei->dual_ltr || !ei->lt_max_sent;
     /* Which long-term picture this one predicts from. Its own, once its chain
        exists; before that -- the first auxiliary view of a sequence -- the
        IDR, which is the main chain's first picture. */
@@ -1980,7 +2005,8 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         int sh_bits = build_slice_header(sh, ei, is_idr, is_ref, is_ltr,
                                          slice.slice_type, nref, qp,
                                          slice.disable_deblocking_filter_idc,
-                                         idr_id_used, ref_lt_idx, cur_lt_idx);
+                                         idr_id_used, ref_lt_idx, cur_lt_idx,
+                                         send_lt_max);
         if (render_packed_bits(ei->context, VAEncPackedHeaderSlice, sh,
                                sh_bits, 0, track, &ntrack) != 0)
         {
@@ -2023,6 +2049,7 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
         {
             ei->ltrv[cur_lt_idx] = curr;
             ei->have_ltrv[cur_lt_idx] = 1;
+            ei->lt_max_sent = 1;
         }
         else
         {
