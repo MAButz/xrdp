@@ -100,11 +100,51 @@ persistent corruption that looks like a chroma bug but is not.
   separating the two layouts — the whole set is `THINCLIENT`, `SMALL_CACHE`,
   `AVC420_ENABLED`, `AVC_DISABLED`, `AVC_THINCLIENT`, `SCALEDMAP_DISABLE` — so
   the version is the only signal and the choice is finally the server's.
-* **Long-term reference frames** — the auxiliary picture predicts from an LTR
-  rather than the previous frame, so the two views do not disturb each other's
-  prediction chain and neither needs a periodic IDR to resynchronise. The slice
-  header is written directly, because iHD predicts from the LTR but does not emit
-  the `dec_ref_pic_marking()` MMCO that tells the decoder about it.
+* **Long-term reference frames, one chain per view** — each view predicts only
+  from its own previous picture, held long-term on its own `LongTermFrameIdx`
+  (main 0, auxiliary 1), and every slice names that picture with a
+  `ref_pic_list_modification` instead of inheriting the default reference list.
+  Neither view disturbs the other's prediction chain and neither needs a periodic
+  IDR to resynchronise. The slice header is written directly, because iHD will
+  predict from a long-term reference but does not emit the
+  `dec_ref_pic_marking()` MMCO that tells the decoder about it — and it ignores
+  reordering syntax when it generates the header itself, so the header has to be
+  ours for the naming to reach the client at all. The first auxiliary picture of
+  a sequence has no chain of its own yet and is coded intra, which also keeps the
+  two chains disjoint from the first picture of each.
+
+  `XRDP_AVC444_DUAL_LTR=0` falls back to the previous scheme: auxiliary long-term,
+  main short-term, both views sharing a two-entry default list in which each finds
+  its own picture at index 1.
+
+* **A downstream proxy can discard the auxiliary view and leave the main view
+  decodable.** This is what the per-view chains are for. A client that paints 4:2:0
+  anyway — a browser that will not recombine the two views — otherwise pays for the
+  chroma half twice, in bandwidth and in a second decode, and then throws it away.
+  Two properties make shedding it safe, and both are in the bitstream:
+
+  1. **Nothing surviving can refer to a dropped picture.** Each slice activates one
+     list-0 entry and names it by `long_term_pic_num`, so a main macroblock has no
+     second index to reach the auxiliary view with, and no inferred picture can be
+     named either.
+  2. **The stream declares a reference slot for the pictures the dropper removes.**
+     Dropping leaves holes in `frame_num`, so the proxy must set
+     `gaps_in_frame_num_value_allowed_flag`, which obliges the decoder to infer a
+     frame per hole and hold it as a *short-term* reference (8.2.5.2). The sliding
+     window (8.2.5.3) evicts only short-term pictures, so with both slots long-term
+     under a ceiling of two there is nothing to evict and nowhere to put the
+     inferred frame — the decoder fails outright rather than degrading. Under
+     dual-LTR `max_num_ref_frames` is therefore 3, with `max_dec_frame_buffering`
+     tracking it as E.2.1 requires. The third slot is declared and never filled;
+     the encoder's own DPB is unchanged, and a client that does not drop pays
+     nothing for it.
+
+  Verified on a 2992×1648 capture: every frame of the stream with the auxiliary
+  views removed is bit-identical to the corresponding main-view frame of the full
+  stream. Note that a hardware decoder will paint straight through a broken
+  reference chain without reporting an error — a deliberately corrupted control
+  stream decoded clean on Chrome's hardware path — so "it looks right" is not
+  evidence here; comparing decoded pictures is.
 * **Chroma interval** — the auxiliary picture only needs to be sent periodically.
   The default of 4 refreshes chroma every fourth frame while luma updates every
   frame, and measures far smoother than every-frame chroma with no visible penalty
@@ -192,8 +232,9 @@ All of these are `[SessionVariables]` in `sesman.ini`, documented there as well:
 | variable | default | effect |
 | -------- | ------- | ------ |
 | `XRDP_USE_ACCEL_ASSIST` | off | required for any of the below |
-| `XRDP_ACCEL_AVC444` | off | AVC444; negotiated, falls back to AVC420 |
+| `XRDP_ACCEL_AVC444` | negotiated | `0` forces AVC420; otherwise follows what the client advertised |
 | `XRDP_AVC444_CHROMA_INTERVAL` | 4 | frames between auxiliary (chroma) pictures |
+| `XRDP_AVC444_DUAL_LTR` | on | per-view long-term chains; `0` for the shared default list |
 | `XRDP_VAAPI_QP` / `_AUX_QP` | 26 | constant quantiser, 1-51 |
 | `XRDP_VAAPI_BITRATE` | 0 (CQP) | kbit/s; switches to VBR |
 | `XRDP_SOUND_MAX_LATENCY_MS` | 0 | drop audio above this measured latency |
