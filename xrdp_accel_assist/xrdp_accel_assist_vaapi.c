@@ -1517,6 +1517,131 @@ render_packed(VAContextID ctx, int htype, unsigned char *data, int bytes,
 }
 
 /*****************************************************************************/
+/* XRDP_VAAPI_DUMP_STREAM=<prefix>: capture the encoded stream for offline
+   analysis.
+
+   A fault that takes hours to appear cannot be caught by appending to one
+   file, so this keeps a bounded window of the MOST RECENT stream instead: two
+   ring files, each capped at XRDP_VAAPI_DUMP_MB (default 64), written
+   alternately and truncated as each comes back into use. At any moment the
+   pair holds between one and two caps' worth of the run-up to now, which is
+   the part that matters when something has just gone wrong on screen.
+
+   The window is bytes, not pictures, so it does not necessarily begin at an
+   IDR: a decoder will refuse it until the first intra picture, while
+   slice-header analysis -- which is what a reference-chain question needs --
+   reads from anywhere.
+
+   <prefix>.index is NOT rotated. One line per access unit,
+
+     <seq> <elapsed ms> <view> <idr> <bytes> <ring file> <offset>
+
+   so the whole session's shape survives even though only its tail is kept,
+   and a picture named in the index can be found by ring file and offset. At
+   eight pictures a second it costs a few megabytes an hour.
+
+   Diagnostic only. Leave XRDP_VAAPI_DUMP_STREAM unset in production. */
+static void
+xrdp_accel_assist_vaapi_dump(int view, const void *cdata, int total)
+{
+    static const char *prefix = NULL;
+    static int checked = 0;
+    static int cap_bytes = 0;
+    static int ring = 0;
+    static int ring_bytes = 0;
+    static int seq = 0;
+    static unsigned int t0 = 0;
+    const unsigned char *p = (const unsigned char *) cdata;
+    char filename[512];
+    char line[256];
+    int is_idr;
+    int off;
+    int fd;
+    int i;
+
+    if (!checked)
+    {
+        const char *mb;
+
+        checked = 1;
+        prefix = g_getenv("XRDP_VAAPI_DUMP_STREAM");
+        mb = g_getenv("XRDP_VAAPI_DUMP_MB");
+        cap_bytes = ((mb != NULL && g_atoi(mb) > 0) ? g_atoi(mb) : 64);
+        cap_bytes *= 1024 * 1024;
+        t0 = g_get_elapsed_ms();
+        if (prefix != NULL)
+        {
+            LOG(LOG_LEVEL_INFO, "vaapi: dumping the stream to %s.{0,1}.h264, "
+                "%d MB a ring file, index in %s.index",
+                prefix, cap_bytes / (1024 * 1024), prefix);
+        }
+    }
+    if (prefix == NULL || total <= 0)
+    {
+        return;
+    }
+
+    /* An IDR anywhere in the access unit makes it a resynchronisation point,
+       which is what a reader looks for first. Start codes are always four
+       bytes here, since this encoder writes them. */
+    is_idr = 0;
+    for (i = 0; i + 4 < total; i++)
+    {
+        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 0 && p[i + 3] == 1)
+        {
+            if ((p[i + 4] & 0x1f) == 5)
+            {
+                is_idr = 1;
+                break;
+            }
+            i += 3;
+        }
+    }
+
+    /* Roll over before writing, so a picture is never split across the two. */
+    if (ring_bytes > 0 && ring_bytes + total > cap_bytes)
+    {
+        ring ^= 1;
+        ring_bytes = 0;
+    }
+    g_snprintf(filename, sizeof(filename) - 1, "%s.%d.h264", prefix, ring);
+    /* Truncate on the first write of each pass over a ring file. */
+    fd = g_file_open_ex(filename, 0, 1, 1, ring_bytes == 0);
+    if (fd < 0)
+    {
+        LOG(LOG_LEVEL_ERROR, "vaapi: cannot open %s", filename);
+        return;
+    }
+    if (ring_bytes > 0)
+    {
+        g_file_seek_end(fd, 0);
+    }
+    off = ring_bytes;
+    if (g_file_write(fd, (const char *) cdata, total) != total)
+    {
+        LOG(LOG_LEVEL_ERROR, "vaapi: short write on %s", filename);
+    }
+    else
+    {
+        ring_bytes += total;
+    }
+    g_file_close(fd);
+
+    g_snprintf(filename, sizeof(filename) - 1, "%s.index", prefix);
+    fd = g_file_open_ex(filename, 0, 1, 1, 0);
+    if (fd >= 0)
+    {
+        g_file_seek_end(fd, 0);
+        g_snprintf(line, sizeof(line) - 1, "%d %u %d %d %d %d %d\n",
+                   seq, g_get_elapsed_ms() - t0, view, is_idr, total,
+                   ring, off);
+        g_file_write(fd, line, g_strlen(line));
+        g_file_close(fd);
+    }
+    seq++;
+}
+
+/*****************************************************************************/
 /* Second half of an encode: wait for the GPU and copy the bitstream out.
    Split from the submission so both AVC444 views can be in flight at once --
    serialising them cost a full CPU round-trip to the GPU per chroma frame,
@@ -1596,6 +1721,7 @@ vaapi_finish(struct enc_info *ei, int flags, void *cdata, int *cdata_bytes)
         return rv;
     }
     *cdata_bytes = total;
+    xrdp_accel_assist_vaapi_dump(view, cdata, total);
     return rv;
 }
 
