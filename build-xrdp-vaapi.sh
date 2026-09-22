@@ -5,7 +5,7 @@
 # Baut xrdp (devel) mit dem VA-API-Hardware-H.264-Encoder im xrdp_accel_assist
 # plus die passende xorgxrdp-Variante mit GBM-backed glamor.
 #
-#   Quelle xrdp:     MAButz/xrdp-1 Branch devel-vaapi
+#   Quelle xrdp:     MAButz/xrdp Branch devel-vaapi
 #                    (= neutrinolabs/xrdp devel + pletch/xrdp-vaapi-encode)
 #   Quelle xorgxrdp: MAButz/xorgxrdp Branch feature/gbm-dmabuf-hwencode
 #                    (= pletch/xorgxrdp-glamor-gbm)
@@ -30,7 +30,7 @@
 #
 set -euo pipefail
 
-XRDP_REPO="${XRDP_REPO:-https://github.com/MAButz/xrdp-1.git}"
+XRDP_REPO="${XRDP_REPO:-https://github.com/MAButz/xrdp.git}"
 XRDP_BRANCH="${XRDP_BRANCH:-devel-vaapi}"
 XORGXRDP_REPO="${XORGXRDP_REPO:-https://github.com/MAButz/xorgxrdp.git}"
 XORGXRDP_BRANCH="${XORGXRDP_BRANCH:-feature/gbm-dmabuf-hwencode}"
