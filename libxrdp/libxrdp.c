@@ -94,9 +94,13 @@ libxrdp_disconnect(struct xrdp_session *session, int errinfo)
     if (trans != NULL && trans->status == TRANS_STATUS_UP &&
             trans->sck >= 0 && rdp != NULL)
     {
-        /* Only send the error info PDU if the client has
-         * indicated it can receive it */
-        if ((early_capability_flags & RNS_UD_CS_SUPPORT_ERRINFO_PDU) != 0)
+        /* Only send the error info PDU if the client has indicated it can
+         * receive it, and only when there is an error to report. A normal
+         * logoff reaches here with errinfo still at its initial
+         * ERRINFO_NONE, and announcing "no error has occurred" in an error
+         * info PDU is what mstsc appears to reject with 0xd06. */
+        if ((early_capability_flags & RNS_UD_CS_SUPPORT_ERRINFO_PDU) != 0 &&
+                errinfo != ERRINFO_NONE)
         {
             rv = xrdp_rdp_send_set_error(rdp, errinfo);
         }
