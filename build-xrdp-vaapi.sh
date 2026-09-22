@@ -5,10 +5,12 @@
 # Baut xrdp (devel) mit dem VA-API-Hardware-H.264-Encoder im xrdp_accel_assist
 # plus die passende xorgxrdp-Variante mit GBM-backed glamor.
 #
-#   Quelle xrdp:     MAButz/xrdp Branch devel-vaapi
-#                    (= neutrinolabs/xrdp devel + pletch/xrdp-vaapi-encode)
-#   Quelle xorgxrdp: MAButz/xorgxrdp Branch feature/gbm-dmabuf-hwencode
-#                    (= pletch/xorgxrdp-glamor-gbm)
+#   Quelle xrdp:     MAButz/xrdp Branch devel-vaapi-kbdind
+#                    (= neutrinolabs/xrdp devel + pletch/xrdp-vaapi-encode
+#                       + keyboard-indicators, neutrinolabs/xrdp#3883)
+#   Quelle xorgxrdp: MAButz/xorgxrdp Branch gbm-vaapi-kbdind
+#                    (= pletch/xorgxrdp-glamor-gbm
+#                       + keyboard-indicators, neutrinolabs/xorgxrdp#436)
 #
 # Zielsystem: Debian 12/13 oder Ubuntu 22.04/24.04 mit ECHTER GPU (/dev/dri
 # vorhanden). Intel Gen9+ (iHD) ist der primaere Zielfall; AMD (radeonsi) geht
@@ -31,9 +33,9 @@
 set -euo pipefail
 
 XRDP_REPO="${XRDP_REPO:-https://github.com/MAButz/xrdp.git}"
-XRDP_BRANCH="${XRDP_BRANCH:-devel-vaapi}"
+XRDP_BRANCH="${XRDP_BRANCH:-devel-vaapi-kbdind}"
 XORGXRDP_REPO="${XORGXRDP_REPO:-https://github.com/MAButz/xorgxrdp.git}"
-XORGXRDP_BRANCH="${XORGXRDP_BRANCH:-feature/gbm-dmabuf-hwencode}"
+XORGXRDP_BRANCH="${XORGXRDP_BRANCH:-gbm-vaapi-kbdind}"
 
 SRC_DIR="${SRC_DIR:-$HOME/src/xrdp-vaapi}"
 PREFIX="${PREFIX:-/usr/local}"
