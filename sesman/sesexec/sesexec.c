@@ -711,6 +711,12 @@ main(int argc, char **argv)
 void
 sesexec_terminate_connected_xrdp_process(enum ccp_close_reason_type reason)
 {
+    LOG(LOG_LEVEL_INFO, "sesexec_terminate_connected_xrdp_process: reason %d, "
+        "ccp_trans %s, status %d",
+        (int)reason,
+        (g_ccp_trans == NULL) ? "NULL" : "present",
+        (g_ccp_trans == NULL) ? -1 : (int)g_ccp_trans->status);
+
     if (g_ccp_trans != NULL && g_ccp_trans->status == TRANS_STATUS_UP)
     {
         // Ask xrdp to exit, specifying the reason to return to

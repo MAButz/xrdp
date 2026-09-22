@@ -295,6 +295,8 @@ xrdp_process_main_loop(struct xrdp_process *self)
             }
         }
         /* send disconnect message if possible */
+        LOG(LOG_LEVEL_INFO, "xrdp_process_main_loop: disconnecting with "
+            "errinfo 0x%8.8x", self->errinfo);
         libxrdp_disconnect(self->session, self->errinfo);
     }
     else
