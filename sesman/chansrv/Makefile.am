@@ -71,7 +71,9 @@ xrdp_chansrv_SOURCES = \
   audin.c \
   audin.h \
   rdpecam.c \
-  rdpecam.h
+  rdpecam.h \
+  rdpecam_dump.c \
+  rdpecam_dump.h
 
 if XRDP_IBUS
 AM_CPPFLAGS += -DXRDP_IBUS $(IBUS_CFLAGS) $(GLIB2_CFLAGS)
