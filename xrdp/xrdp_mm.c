@@ -795,6 +795,39 @@ xrdp_mm_process_rail_update_window_text(struct xrdp_mm *self, struct stream *s)
 }
 
 /*****************************************************************************/
+/* Does this confirmed EGFX capability set allow AVC444 (MS-RDPEGFX 2.2.3)?
+   CAPVERSION_10 and 10.2 .. 10.7 do unless RDPGFX_CAPS_FLAG_AVC_DISABLED is
+   set; CAPVERSION_81 is AVC420 only; 8 and 101 have no AVC. Evaluated on
+   the confirmed set, since that is the contract. */
+static int
+xrdp_mm_egfx_caps_avc444(int version, int flags)
+{
+    if (flags & XR_RDPGFX_CAPS_FLAG_AVC_DISABLED)
+    {
+        return 0;
+    }
+    switch (version)
+    {
+        /* No capability flag separates the v1 and v2 layouts, so the
+           version decides. 10.0 clients get v1: v2 post-dates that set, and
+           guessing low costs little where guessing high breaks the
+           session. */
+        case XR_RDPGFX_CAPVERSION_10:
+            return 1;
+        case XR_RDPGFX_CAPVERSION_102: /* FALLTHROUGH */
+        case XR_RDPGFX_CAPVERSION_103: /* FALLTHROUGH */
+        case XR_RDPGFX_CAPVERSION_104: /* FALLTHROUGH */
+        case XR_RDPGFX_CAPVERSION_105: /* FALLTHROUGH */
+        case XR_RDPGFX_CAPVERSION_106: /* FALLTHROUGH */
+        case XR_RDPGFX_CAPVERSION_106_ERR: /* FALLTHROUGH */
+        case XR_RDPGFX_CAPVERSION_107:
+            return 2;
+        default:
+            return 0;
+    }
+}
+
+/*****************************************************************************/
 /* returns error
    process alternate secondary drawing orders for rail channel */
 static int
@@ -1227,6 +1260,7 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
             case XR_RDPGFX_CAPVERSION_104: /* FALLTHROUGH */
             case XR_RDPGFX_CAPVERSION_105: /* FALLTHROUGH */
             case XR_RDPGFX_CAPVERSION_106: /* FALLTHROUGH */
+            case XR_RDPGFX_CAPVERSION_106_ERR: /* FALLTHROUGH */
             case XR_RDPGFX_CAPVERSION_107:
                 if (!(flags & XR_RDPGFX_CAPS_FLAG_AVC_DISABLED))
                 {
@@ -1284,6 +1318,26 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_caps_advertise: xrdp_egfx_send_reset_graphics "
             "error %d monitorCount %d",
             error, self->wm->client_info->display_sizes.monitorCount);
+        /* Record whether the confirmed set permits AVC444 (H.264 mode only). */
+        /* A level, not a flag (0 none, 1 v1, 2 v2): an if, since && would
+           collapse it to 1. */
+        if (self->egfx_flags == XRDP_EGFX_H264)
+        {
+            self->wm->client_info->gfx_avc444 =
+                xrdp_mm_egfx_caps_avc444(ver_flags[best_index].version,
+                                         ver_flags[best_index].flags);
+        }
+        else
+        {
+            self->wm->client_info->gfx_avc444 = 0;
+        }
+        LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_caps_advertise: AVC444 %s by the "
+            "confirmed capability set 0x%8.8x flags 0x%8.8x",
+            self->wm->client_info->gfx_avc444 == 2 ? "v2 supported" :
+            self->wm->client_info->gfx_avc444 == 1 ? "v1 supported" :
+            "not supported",
+            ver_flags[best_index].version, ver_flags[best_index].flags);
+
         self->egfx_up = 1;
         xrdp_mm_egfx_create_surfaces(self);
         self->encoder = xrdp_encoder_create(self);
@@ -1306,6 +1360,7 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
         lrect.right = screen->width;
         lrect.bottom = screen->height;
         self->wm->client_info->gfx = 0;
+        self->wm->client_info->gfx_avc444 = 0;
         xrdp_encoder_delete(self->encoder);
         self->encoder = xrdp_encoder_create(self);
         xrdp_bitmap_invalidate(screen, &lrect);

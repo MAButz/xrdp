@@ -279,6 +279,13 @@ struct xrdp_client_info
 
     enum unicode_input_state unicode_input_support;
     enum xrdp_capture_code capture_code;
+
+    /* EGFX: the confirmed capability set permits AVC444. Set by
+       xrdp_mm_egfx_caps_advertise(); read by xorgxrdp to pick the codec id.
+       Appended at the end: xorgxrdp is built separately against this
+       header. */
+    /* 0 none, 1 v1 chroma layout, 2 v2 */
+    int gfx_avc444;
 };
 
 /*

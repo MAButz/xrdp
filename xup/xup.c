@@ -228,6 +228,8 @@ convert_xrdp_client_info_to_xup_client_info(
     dst->rfx_frame_interval = src->rfx_frame_interval;
     dst->h264_frame_interval = src->h264_frame_interval;
     dst->normal_frame_interval = src->normal_frame_interval;
+
+    dst->gfx_avc444 = src->gfx_avc444;
 }
 
 /******************************************************************************/

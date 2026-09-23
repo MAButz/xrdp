@@ -70,9 +70,18 @@ struct xup_client_info
     int rfx_frame_interval;
     int h264_frame_interval;
     int normal_frame_interval;
+
+    /* The confirmed EGFX capability set permits AVC444. xorgxrdp uses it to
+       pick the codec id and size the helper's encoder. */
+    /* 0 none, 1 AVC444 v1 chroma layout, 2 v2 */
+    int gfx_avc444;
 };
 
 /* yyyymmdd of last incompatible change to xup_client_info */
-#define XUP_CLIENT_INFO_CURRENT_VERSION 20250528
+/* From this version gfx_avc444 is a level (0 none, 1 v1, 2 v2); before,
+   any non-zero value meant "supported". Check the version before reading
+   it as a level. */
+#define XUP_CLIENT_INFO_LEVEL_AVC444_VERSION 20260908
+#define XUP_CLIENT_INFO_CURRENT_VERSION 20260908
 
 #endif // XUP_CLIENT_INFO_H
