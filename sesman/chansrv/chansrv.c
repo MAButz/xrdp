@@ -46,6 +46,7 @@
 #include "xrdp_constants.h"
 #include "audin.h"
 #include "rdpecam.h"
+#include "rdpecam_dump.h"
 #include "channel_defs.h"
 #include "dechunker.h"
 
@@ -493,6 +494,7 @@ process_message_channel_setup(struct stream *s)
     audin_init();
 
     rdpecam_init();
+    rdpecam_dump_init();
     if (g_cfg->enable_camera_redirection)
     {
         if (have_drdynvc)
