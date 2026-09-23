@@ -226,6 +226,9 @@ FileUmask=077
 #SoundNumSilentFramesAAC=4
 #SoundNumSilentFramesMP3=2
 #SoundMsecDoNotSend=1000
+; camera redirection ([MS-RDPECAM]). Offers the client's cameras to the
+; session. See sesman.ini(5)
+#EnableCameraRedirection=true
 
 [ChansrvLogging]
 ; Note: one log file is created per display and the LogFile config value
