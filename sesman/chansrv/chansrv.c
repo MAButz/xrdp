@@ -45,6 +45,7 @@
 #include "xrdp_sockets.h"
 #include "xrdp_constants.h"
 #include "audin.h"
+#include "rdpecam.h"
 #include "channel_defs.h"
 #include "dechunker.h"
 
@@ -404,6 +405,7 @@ process_message_channel_setup(struct stream *s)
     int num_chans;
     int index;
     int rv;
+    int have_drdynvc = 0;
     struct chan_item *ci;
 
     g_num_chan_items = 0;
@@ -451,6 +453,11 @@ process_message_channel_setup(struct stream *s)
             g_rail_index = g_num_chan_items;
             g_rail_chan_id = ci->id;
         }
+        else if (g_strcasecmp(ci->name, DRDYNVC_SVC_CHANNEL_NAME) == 0)
+        {
+            /* handled by xrdp, but tells us dynamic channels will work */
+            have_drdynvc = 1;
+        }
         else
         {
             LOG_DEVEL(LOG_LEVEL_DEBUG, "other %s", ci->name);
@@ -484,6 +491,20 @@ process_message_channel_setup(struct stream *s)
     }
 
     audin_init();
+
+    rdpecam_init();
+    if (g_cfg->enable_camera_redirection)
+    {
+        if (have_drdynvc)
+        {
+            rdpecam_start();
+        }
+        else
+        {
+            LOG(LOG_LEVEL_INFO, "Camera redirection needs dynamic virtual "
+                "channels, which the client does not support");
+        }
+    }
 
     return rv;
 }
@@ -1687,6 +1708,7 @@ channel_thread_loop(void *in_val)
                 sound_deinit();
                 devredir_deinit();
                 rail_deinit();
+                rdpecam_deinit();
                 break;
             }
 
@@ -1710,6 +1732,7 @@ channel_thread_loop(void *in_val)
                     sound_deinit();
                     devredir_deinit();
                     rail_deinit();
+                    rdpecam_deinit();
                     /* delete g_con_trans */
                     trans_delete(g_con_trans);
                     g_con_trans = 0;
