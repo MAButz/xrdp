@@ -357,7 +357,6 @@ xrdp_mm_create_session(struct xrdp_mm *self)
     return rv;
 }
 
-
 /*****************************************************************************/
 /* Send a request to sesman to get session file descriptors */
 static int
@@ -1329,7 +1328,7 @@ xrdp_mm_update_module_frame_ack(struct xrdp_mm *self)
         struct xrdp_mod *m = self->mod;
         if (m != NULL)
         {
-            m->mod_frame_ack(m, 0, INT_MAX);
+            m->mod_frame_ack(m, 0, INT_MAX, 0);
         }
     }
     else
@@ -1346,7 +1345,8 @@ xrdp_mm_update_module_frame_ack(struct xrdp_mm *self)
                 if (m != NULL)
                 {
                     m->mod_frame_ack(m, 0,
-                                     encoder->frame_id_server);
+                                     encoder->frame_id_server,
+                                     encoder->last_rtt_ms);
                 }
             }
         }
@@ -1406,6 +1406,56 @@ xrdp_mm_egfx_frame_ack(void *user, uint32_t queue_depth, int frame_id,
     {
         /* frame acks can come out of order so ignore older one */
         encoder->frame_id_client = MAX(frame_id, encoder->frame_id_client);
+    }
+    if (frame_id > 0)
+    {
+        /* The client's own latency for the module; excludes xorgxrdp's
+           capture interval. */
+        unsigned int sent = encoder->frame_sent_ms[frame_id & 63];
+
+        if (sent != 0)
+        {
+            encoder->last_rtt_ms = (int) (g_get_elapsed_ms() - sent);
+        }
+    }
+    if (encoder->frame_log && frame_id > 0)
+    {
+        /* The client's reported queue depth: whether it is keeping up. */
+        int rtt = (int) (g_get_elapsed_ms() -
+                         encoder->frame_sent_ms[frame_id & 63]);
+        int inflight = encoder->frame_id_server - encoder->frame_id_client;
+
+        encoder->ack_count++;
+        encoder->ack_rtt_total_ms += rtt;
+        encoder->ack_qdepth_total += (int) queue_depth;
+        encoder->ack_inflight_total += inflight;
+        if (rtt > encoder->ack_rtt_max_ms)
+        {
+            encoder->ack_rtt_max_ms = rtt;
+        }
+        if ((int) queue_depth > encoder->ack_qdepth_max)
+        {
+            encoder->ack_qdepth_max = (int) queue_depth;
+        }
+        if (encoder->ack_count >= 100)
+        {
+            LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_frame_ack: over %d frames: "
+                "ack rtt mean %d ms max %d ms, client queue depth mean %d "
+                "max %d, frames in flight mean %d of %d allowed",
+                encoder->ack_count,
+                encoder->ack_rtt_total_ms / encoder->ack_count,
+                encoder->ack_rtt_max_ms,
+                encoder->ack_qdepth_total / encoder->ack_count,
+                encoder->ack_qdepth_max,
+                encoder->ack_inflight_total / encoder->ack_count,
+                encoder->frames_in_flight);
+            encoder->ack_count = 0;
+            encoder->ack_rtt_total_ms = 0;
+            encoder->ack_rtt_max_ms = 0;
+            encoder->ack_qdepth_total = 0;
+            encoder->ack_qdepth_max = 0;
+            encoder->ack_inflight_total = 0;
+        }
     }
     xrdp_mm_update_module_frame_ack(self);
     return 0;
@@ -1797,7 +1847,7 @@ process_display_control_monitor_layout_data(struct xrdp_wm *wm)
             mm->encoder = xrdp_encoder_create(mm);
 
             // Ack all frames to speed up resize.
-            module->mod_frame_ack(module, 0, INT_MAX);
+            module->mod_frame_ack(module, 0, INT_MAX, 0);
 
             // Redraw the screen
             xrdp_bitmap_invalidate(wm->screen, 0);
@@ -3784,12 +3834,16 @@ xrdp_mm_process_enc_done(struct xrdp_mm *self)
                 if (client_ack)
                 {
                     self->encoder->frame_id_server = enc_done->frame_id;
+                    /* Recorded even without frame logging: the module
+                       uses the round trip. */
+                    self->encoder->frame_sent_ms[
+                        enc_done->frame_id & 63] = g_get_elapsed_ms();
                     xrdp_mm_update_module_frame_ack(self);
                 }
                 else if (self->mod != NULL)
                 {
                     self->mod->mod_frame_ack(self->mod, 0,
-                                             enc_done->frame_id);
+                                             enc_done->frame_id, 0);
                 }
             }
             if (is_gfx)
@@ -4162,7 +4216,6 @@ server_init_xkb_layout(struct xrdp_mod *mod,
     xrdp_init_xkb_layout(client_info);
 }
 
-
 /*****************************************************************************/
 static int
 server_fill_rect(struct xrdp_mod *mod, int x, int y, int cx, int cy)
@@ -4396,7 +4449,7 @@ server_paint_rects_ex(struct xrdp_mod *mod,
         LOG(LOG_LEVEL_DEBUG, "server_paint_rects: gfx session and no encoder");
         if (mod->mod_frame_ack != 0)
         {
-            mod->mod_frame_ack(mod, flags, frame_id);
+            mod->mod_frame_ack(mod, flags, frame_id, 0);
         }
         return 0;
     }
@@ -4418,7 +4471,7 @@ server_paint_rects_ex(struct xrdp_mod *mod,
     xrdp_bitmap_delete(b);
     if (mod->mod_frame_ack != 0)
     {
-        mod->mod_frame_ack(mod, flags, frame_id);
+        mod->mod_frame_ack(mod, flags, frame_id, 0);
     }
     if (shmem_ptr != NULL)
     {
@@ -4910,7 +4963,6 @@ server_get_channel_count(struct xrdp_mod *mod)
 
     return libxrdp_get_channel_count(wm->session);
 }
-
 
 /*****************************************************************************/
 /*return 0 if the index is not found*/

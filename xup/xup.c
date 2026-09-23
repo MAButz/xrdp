@@ -924,7 +924,6 @@ process_server_add_char(struct mod *mod, struct stream *s)
     return rv;
 }
 
-
 /******************************************************************************/
 /* return error */
 static int
@@ -1014,7 +1013,6 @@ process_server_create_os_surface_bpp(struct mod *mod, struct stream *s)
     rv = mod->server_create_os_surface_bpp(mod, rdpid, width, height, bpp);
     return rv;
 }
-
 
 /******************************************************************************/
 /* return error */
@@ -1238,7 +1236,7 @@ process_server_paint_rect_shmem(struct mod *amod, struct stream *s)
 /******************************************************************************/
 /* return error */
 static int
-send_paint_rect_ex_ack(struct mod *mod, int flags, int frame_id)
+send_paint_rect_ex_ack(struct mod *mod, int flags, int frame_id, int rtt_ms)
 {
     int len;
     struct stream *s;
@@ -1249,6 +1247,10 @@ send_paint_rect_ex_ack(struct mod *mod, int flags, int frame_id)
     out_uint16_le(s, 106);
     out_uint32_le(s, flags);
     out_uint32_le(s, frame_id);
+    /* Client ack round trip (ms), appended after frame_id; zero when
+       unknown. Older peers stop at frame_id. Unlike the gap xorgxrdp can
+       measure, it excludes xorgxrdp's own capture interval. */
+    out_uint32_le(s, rtt_ms);
     s_mark_end(s);
     len = (int)(s->end - s->data);
     s_pop_layer(s, iso_hdr);
@@ -2121,11 +2123,12 @@ lib_mod_check_wait_objs(struct mod *mod)
 /******************************************************************************/
 /* return error */
 static int
-lib_mod_frame_ack(struct mod *amod, int flags, int frame_id)
+lib_mod_frame_ack(struct mod *amod, int flags, int frame_id, int rtt_ms)
 {
     LOG_DEVEL(LOG_LEVEL_TRACE,
-              "lib_mod_frame_ack: flags 0x%8.8x frame_id %d", flags, frame_id);
-    send_paint_rect_ex_ack(amod, flags, frame_id);
+              "lib_mod_frame_ack: flags 0x%8.8x frame_id %d rtt %d ms",
+              flags, frame_id, rtt_ms);
+    send_paint_rect_ex_ack(amod, flags, frame_id, rtt_ms);
     return 0;
 }
 

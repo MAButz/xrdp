@@ -333,6 +333,12 @@ xrdp_encoder_create(struct xrdp_mm *mm)
                     env_var);
             }
         }
+        env_var = g_getenv("XRDP_GFX_FRAME_LOG");
+        self->frame_log = (env_var != NULL && g_atoi(env_var) != 0);
+        if (self->frame_log)
+        {
+            LOG(LOG_LEVEL_INFO, "xrdp_encoder_create: per-frame logging on");
+        }
         env_var = g_getenv("XRDP_GFX_MAX_COMPRESSED_BYTES");
         self->max_compressed_bytes = DEFAULT_XRDP_GFX_MAX_COMPRESSED_BYTES;
         if (env_var != NULL)
@@ -378,7 +384,6 @@ xrdp_encoder_delete(struct xrdp_encoder *self)
 #if defined(XRDP_RFXCODEC) || defined(XRDP_X264) || defined(XRDP_OPENH264)
     int index;
 #endif
-
 
     LOG_DEVEL(LOG_LEVEL_INFO, "xrdp_encoder_delete:");
     if (self == 0)

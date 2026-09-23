@@ -32,6 +32,10 @@ struct xrdp_encoder
     int codec_id;
     int codec_quality;
     int max_compressed_bytes;
+    /* XRDP_GFX_FRAME_LOG=1: one line per encoded frame (AVC420 and AVC444).
+       Like the other XRDP_GFX_* settings this is read from xrdp's own
+       environment (an xrdp.service drop-in), not sesman.ini. */
+    int frame_log;
     tbus xrdp_encoder_event_to_proc;
     tbus xrdp_encoder_event_processed;
     tbus xrdp_encoder_term_request;
@@ -48,6 +52,21 @@ struct xrdp_encoder
     int frame_id_client; /* last frame id received from client */
     int frame_id_server; /* last frame id received from Xorg */
     int frame_id_server_sent;
+    /* AVC444: luma-only frames since the last aux view, per monitor. Non-zero
+       means the aux carries damage beyond this frame's rects. */
+    int avc444_luma_only_run[16];
+    /* XRDP_GFX_FRAME_LOG: ack round trip and the client's reported queue
+       depth. Send times are a ring indexed by frame id. */
+    unsigned int frame_sent_ms[64];
+    /* Most recent client ack round trip (ms), passed to the module for
+       capture pacing. */
+    int last_rtt_ms;
+    int ack_count;
+    int ack_rtt_total_ms;
+    int ack_rtt_max_ms;
+    int ack_qdepth_total;
+    int ack_qdepth_max;
+    int ack_inflight_total;
     int frames_in_flight;
     int gfx;
     int gfx_ack_off;
