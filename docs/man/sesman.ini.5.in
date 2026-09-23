@@ -513,6 +513,16 @@ Sets the duration(msec). Sound data is not send to client during \fInumber\fR
 millisecond(s) after close message is sent, when AAC/MP3 is selected.
 If set to 0, all the data is sent. If not specified, defaults to \fI1000\fR.
 
+.TP
+\fBEnableCameraRedirection\fR=\fI[false|true]\fR
+If set to \fBtrue\fR, the channel server asks the client for its cameras
+using the video capture virtual channel ([MS-RDPECAM]). This needs a client
+with dynamic virtual channel support. With mstsc.exe, cameras must also be
+selected for redirection on the client (\fBcamerastoredirect\fR in the .rdp
+file, and the camera check box of the security prompt shown for unsigned
+\&.rdp files).
+If not specified, defaults to \fBfalse\fR.
+
 .SH "SESSIONS VARIABLES"
 All entries in the \fB[SessionVariables]\fR section are set as
 environment variables in the user's session.
