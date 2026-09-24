@@ -168,6 +168,11 @@ AC_ARG_ENABLE(openh264, AS_HELP_STRING([--enable-openh264],
               [Use Cisco OpenH264 library (default: no)]),
               [], [enable_openh264=no])
 AM_CONDITIONAL(XRDP_OPENH264, [test x$enable_openh264 = xyes])
+AC_ARG_ENABLE(rdpecam, AS_HELP_STRING([--enable-rdpecam],
+              [Build the PipeWire camera sink for camera redirection,
+               needs libpipewire and openh264 (default: no)]),
+              [], [enable_rdpecam=no])
+AM_CONDITIONAL(XRDP_RDPECAM_PIPEWIRE, [test x$enable_rdpecam = xyes])
 AC_ARG_ENABLE(nvenc, AS_HELP_STRING([--enable-nvenc],
               [Use nvenc library (default: no), env vars XRDP_NVENC_CFLAGS and
                XRDP_NVENC_LIBS should be set if used]),
@@ -490,6 +495,12 @@ AS_IF( [test "x$enable_x264" = "xyes"] , [PKG_CHECK_MODULES(XRDP_X264, x264 >= 0
 
 AS_IF( [test "x$enable_openh264" = "xyes"] , [PKG_CHECK_MODULES(XRDP_OPENH264, openh264 >= 2.0.0)] )
 
+if test "x$enable_rdpecam" = "xyes"
+then
+  PKG_CHECK_MODULES([RDPECAM], [libpipewire-0.3 >= 0.3.40 openh264 >= 2.0.0], [],
+    [AC_MSG_ERROR([please install libpipewire-0.3-dev and libopenh264-dev])])
+fi
+
 if test "x$enable_nvenc" = "xyes"
 then
 enable_accel=$enable_nvenc
@@ -697,6 +708,7 @@ echo "  ipv6                            $enable_ipv6"
 echo "  ipv6only                        $enable_ipv6only"
 echo "  vsock                           $enable_vsock"
 echo "  ibus                            $enable_ibus"
+echo "  rdpecam (PipeWire camera)       $enable_rdpecam"
 echo "  auth mechanism                  $auth_mech"
 echo "  rdpsndaudin                     $enable_rdpsndaudin"
 echo "  smartcard (not for production)  $enable_smartcard"
