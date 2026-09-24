@@ -35,6 +35,11 @@ AM_CPPFLAGS += -DXRDP_MP3LAME
 CHANSRV_EXTRA_LIBS += -lmp3lame
 endif
 
+if XRDP_RDPECAM_PIPEWIRE
+AM_CPPFLAGS += -DXRDP_RDPECAM_PIPEWIRE $(RDPECAM_CFLAGS)
+CHANSRV_EXTRA_LIBS += $(RDPECAM_LIBS)
+endif
+
 AM_CFLAGS = $(X_CFLAGS)
 
 sbin_PROGRAMS = \
@@ -78,6 +83,12 @@ AM_CPPFLAGS += -DXRDP_IBUS $(IBUS_CFLAGS) $(GLIB2_CFLAGS)
 CHANSRV_EXTRA_LIBS += $(IBUS_LIBS) $(GLIB2_LIBS)
 xrdp_chansrv_SOURCES += \
   input_ibus.c
+endif
+
+if XRDP_RDPECAM_PIPEWIRE
+xrdp_chansrv_SOURCES += \
+  rdpecam_pipewire.c \
+  rdpecam_pipewire.h
 endif
 
 if XRDP_SMARTCARD

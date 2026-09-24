@@ -46,6 +46,9 @@
 #include "xrdp_constants.h"
 #include "audin.h"
 #include "rdpecam.h"
+#ifdef XRDP_RDPECAM_PIPEWIRE
+#include "rdpecam_pipewire.h"
+#endif
 #include "channel_defs.h"
 #include "dechunker.h"
 
@@ -493,6 +496,9 @@ process_message_channel_setup(struct stream *s)
     audin_init();
 
     rdpecam_init();
+#ifdef XRDP_RDPECAM_PIPEWIRE
+    rdpecam_pipewire_init();
+#endif
     if (g_cfg->enable_camera_redirection)
     {
         if (have_drdynvc)
@@ -1764,6 +1770,9 @@ channel_thread_loop(void *in_val)
             sound_check_wait_objs();
             devredir_check_wait_objs();
             xfuse_check_wait_objs();
+#ifdef XRDP_RDPECAM_PIPEWIRE
+            rdpecam_pipewire_check_wait_objs();
+#endif
             timeout = -1;
             num_objs = 0;
             num_wobjs = 0;
@@ -1783,9 +1792,16 @@ channel_thread_loop(void *in_val)
             sound_get_wait_objs(objs, &num_objs, &timeout);
             devredir_get_wait_objs(objs, &num_objs, &timeout);
             xfuse_get_wait_objs(objs, &num_objs, &timeout);
+#ifdef XRDP_RDPECAM_PIPEWIRE
+            rdpecam_pipewire_get_wait_objs(objs, &num_objs, &timeout);
+#endif
             get_timeout(&timeout);
         } /* end while (g_obj_wait(objs, num_objs, 0, 0, timeout) == 0) */
     }
+
+#ifdef XRDP_RDPECAM_PIPEWIRE
+    rdpecam_pipewire_deinit();
+#endif
 
     trans_delete(g_lis_trans);
     g_lis_trans = 0;
