@@ -459,6 +459,7 @@ uniform vec2 tex_size;\n\
 uniform float pad_h;\n\
 uniform float bpf;\n\
 uniform float y_off;\n\
+uniform float split;\n\
 uniform vec4 umath;\n\
 uniform vec4 vmath;\n\
 void main(void)\n\
@@ -476,9 +477,10 @@ void main(void)\n\
     float sy;\n\
     bx = floor(gl_FragCoord.x) * bpf;\n\
     y = gl_FragCoord.y + y_off;\n\
-    x1 = ceil(tex_size.x / 16.0) * 8.0;\n\
-    /* x1 is a multiple of eight, so a fragment's bytes (four, two or\n\
-       one) never straddle the U/V split and one branch settles them. */\n\
+    x1 = split;\n\
+    /* x1 is a multiple of eight (half a 16- or 32-aligned width), so a\n\
+       fragment's bytes (four, two or one) never straddle the U/V\n\
+       split and one branch settles them. */\n\
     if (bx < x1)\n\
     {\n\
         base = bx;\n\
