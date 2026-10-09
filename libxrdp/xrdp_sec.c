@@ -1817,9 +1817,24 @@ xrdp_sec_process_mcs_data_CS_CORE(struct xrdp_sec *self, struct stream *s)
     {
         return 0;
     }
-    in_uint8s(s, 64); /* clientDigProductId */
-    LOG_DEVEL(LOG_LEVEL_TRACE, "Received [MS-RDPBCGR] TS_UD_CS_CORE "
-              "<Optional Field> clientDigProductId (ignored)");
+    {
+        /* DIAGNOSE (nur Testbau): Kennungen des Clients protokollieren */
+        char dig[33];
+        int i;
+        int c;
+
+        for (i = 0; i < 32; i++)
+        {
+            in_uint8(s, c);
+            dig[i] = (c >= 0x20 && c < 0x7f) ? (char)c : (c == 0 ? '\0' : '?');
+            in_uint8s(s, 1);
+        }
+        dig[32] = '\0';
+        LOG(LOG_LEVEL_WARNING, "[diag] client '%s' build %d "
+            "earlyCapabilityFlags 0x%4.4x clientDigProductId '%s'",
+            client_info->client_name, client_info->build,
+            client_info->mcs_early_capability_flags, dig);
+    }
 
     if (!s_check_rem(s, 1))
     {
