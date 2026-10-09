@@ -312,6 +312,11 @@ PULSE_SCRIPT=@sesmansysconfdir@/pulse/default.pa
 ; view is a reasonable desktop setting where bandwidth allows.
 ;XRDP_VAAPI_QP=28
 ;XRDP_VAAPI_AUX_QP=18
+; Chroma quantiser relative to the QP above, -12 to 12. Negative values
+; spend a few more bits on colour, which 4:2:0 already halves: red or blue
+; text and thin coloured lines come out less washed out. No extra encoder
+; load. -6 is a reasonable start; 0 is the H.264 default.
+;XRDP_VAAPI_CHROMA_QP_OFFSET=0
 ; Rate control. By default the encoder runs at constant QP, which holds
 ; quality steady but leaves frame size unbounded -- a high-motion frame can be
 ; an order of magnitude larger than a still one. Setting a bitrate in kbit/s
