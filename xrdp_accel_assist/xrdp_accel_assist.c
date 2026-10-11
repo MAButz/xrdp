@@ -45,6 +45,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
+#include <dirent.h>
 #include "xrdp_accel_assist_vaapi.h"
 #endif
 
@@ -225,11 +226,12 @@ gfx_wiretosurface1(struct xorgxrdp_info *xi, struct stream *s)
          codec_id, encoder_flags);
     LOG_DEVEL(LOG_LEVEL_INFO, "gfx_wiretosurface1: rv %d cdata_bytes %d",
               rv, cdata_bytes);
-    if (rv == ENCODER_ERROR)
+    if (rv == ENCODER_ERROR || rv == FRAME_UNCHANGED)
     {
         /* Nothing encoded: forward the frame empty, not the whole shared
            buffer as if it held a picture. xrdp skips an empty pre-encoded
-           frame, and the next is an IDR. */
+           frame. After an error the next frame is an IDR; after
+           FRAME_UNCHANGED (only repainted pixels) nothing was owed. */
         cdata_bytes = 0;
     }
     if (codec_id == 0x000E || codec_id == 0x000F)
@@ -238,7 +240,7 @@ gfx_wiretosurface1(struct xorgxrdp_info *xi, struct stream *s)
                     | (((unsigned char *) addr)[1] << 8)
                     | (((unsigned char *) addr)[2] << 16)
                     | (((unsigned char *) addr)[3] << 24);
-        LOG(LOG_LEVEL_INFO, "gfx_wiretosurface1: AVC444 codec_id 0x%4.4x "
+        LOG(LOG_LEVEL_DEBUG, "gfx_wiretosurface1: AVC444 codec_id 0x%4.4x "
             "rv %d cdata_bytes %d (len1 %d)", codec_id, rv, cdata_bytes, alen1);
     }
 
@@ -752,6 +754,20 @@ xrdp_process_message(struct xorgxrdp_info *xi, struct stream *s)
             LOG(LOG_LEVEL_DEBUG, "Resize 302 found (len: %d, msg1: %d, msg2: %d)", len, msg_type1, msg_type2);
         }
     }
+    else if (msg_type1 == 106 && s_check_rem(s, 12)) /* client region ex */
+    {
+        int flags;
+        int ack;
+        int rtt;
+
+        /* a frame ack; newer xrdp appends its send-to-ack round trip */
+        in_uint32_le(s, flags);
+        in_uint32_le(s, ack);
+        in_uint32_le(s, rtt);
+        (void)flags;
+        (void)ack;
+        xrdp_accel_assist_x11_note_rtt(rtt);
+    }
     /* Reset read pointer */
     s->p = s->data;
     return trans_write_copy_s(xi->xorg_trans, s);
@@ -1021,19 +1037,91 @@ signal_ready(void)
 
 #if defined(XRDP_VAAPI)
 /*****************************************************************************/
+/* The render node to encode on. XRDP_VAAPI_DEVICE names it outright.
+   Otherwise it is the render node of the GPU the session renders on, passed
+   as XRDP_ACCEL_ASSIST_DRM_DEVICE by xorgxrdp (the node glamor opened, card
+   or render) or wlxrdp (the compositor's main device): the frames reach the
+   encoder as dma-bufs, so both must be on one GPU. Without either (an
+   older xorgxrdp or wlxrdp), /dev/dri/renderD128, which is also glamor's
+   default. */
+const char *
+xrdp_accel_assist_render_node(void)
+{
+    static char node[64];
+    static int resolved = 0;
+    const char *dev;
+    char path[128];
+    struct stat st;
+    DIR *dir;
+    struct dirent *ent;
+    int found;
+
+    dev = g_getenv("XRDP_VAAPI_DEVICE");
+    if (dev != NULL)
+    {
+        return dev;
+    }
+    if (resolved)
+    {
+        return node;
+    }
+    resolved = 1;
+    g_strncpy(node, "/dev/dri/renderD128", sizeof(node) - 1);
+    dev = g_getenv("XRDP_ACCEL_ASSIST_DRM_DEVICE");
+    if (dev == NULL)
+    {
+        return node;
+    }
+    if (stat(dev, &st) != 0 || !S_ISCHR(st.st_mode))
+    {
+        LOG(LOG_LEVEL_WARNING, "render node: the session's DRM device %s "
+            "is not a device; using %s", dev, node);
+        return node;
+    }
+    /* A card node and its render node share a device directory in sysfs. */
+    g_snprintf(path, sizeof(path), "/sys/dev/char/%u:%u/device/drm",
+               major(st.st_rdev), minor(st.st_rdev));
+    dir = opendir(path);
+    if (dir == NULL)
+    {
+        LOG(LOG_LEVEL_WARNING, "render node: no %s for %s; using %s", path,
+            dev, node);
+        return node;
+    }
+    found = 0;
+    while (!found && (ent = readdir(dir)) != NULL)
+    {
+        if (g_strncmp(ent->d_name, "renderD", 7) == 0)
+        {
+            g_snprintf(node, sizeof(node), "/dev/dri/%s", ent->d_name);
+            found = 1;
+        }
+    }
+    closedir(dir);
+    if (!found)
+    {
+        LOG(LOG_LEVEL_WARNING, "render node: the session's GPU (%s) has "
+            "none; using %s", dev, node);
+        return node;
+    }
+    LOG(LOG_LEVEL_INFO, "render node: %s, the session's GPU (%s)", node,
+        dev);
+    return node;
+}
+
+/*****************************************************************************/
 /* Is the encoder's render node driven by NVIDIA's driver (NVENC, not VA-API)?
    Asked of sysfs, not of the X server: xorgxrdp, which is the X server,
    waits for signal_ready() before it serves us */
 static int
 render_node_is_nvidia(void)
 {
-    const char *dev = g_getenv("XRDP_VAAPI_DEVICE");
     char path[128];
     char link[256];
     struct stat st;
     ssize_t n;
 
-    if (stat(dev != NULL ? dev : "/dev/dri/renderD128", &st) != 0)
+    if (stat(xrdp_accel_assist_render_node(), &st) != 0)
     {
         return 0;
     }

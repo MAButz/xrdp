@@ -27,6 +27,18 @@ typedef intptr_t inf_image_t;
    xrdp_accel_assist_yami */
 struct enc_info;
 
+/* An NV12 encode target as the shaders draw it. Plane 0 is Y, plane 1 the
+   interleaved UV. tex[1] == 0: one texture holds both, Y rows then UV rows
+   (the GL-allocated target NVENC reads). Otherwise the planes are the
+   layers of the encoder's own surface, each in its own texture. bpf: bytes
+   each fragment writes, 4 for RGBA8 over a linear plane, 1 for an R8
+   plane, 2 for a GR88 one. */
+struct xh_enc_target
+{
+    unsigned int tex[2];
+    int bpf[2];
+};
+
 int
 xrdp_accel_assist_x11_init(void);
 int
@@ -48,6 +60,8 @@ xrdp_accel_assist_x11_encoder_avc444_v2(void);
 int
 xrdp_accel_assist_x11_create_pixmap(int width, int height, int magic,
                                     int con_id, int mon_id);
+void
+xrdp_accel_assist_x11_note_rtt(int rtt_ms);
 enum encoder_result
 xrdp_accel_assist_x11_encode_pixmap(int left, int top, int width, int height,
                                     int mon_id, int num_crects,

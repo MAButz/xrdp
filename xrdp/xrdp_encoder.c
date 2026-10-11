@@ -813,6 +813,69 @@ gfx_send_done(struct xrdp_encoder *self, XRDP_ENC_DATA *enc,
 }
 
 /*****************************************************************************/
+/* Reads a rects trailer (see XH_AVC444_RECTS_MAGIC) at pos, if one with this
+   magic is there, into *rects (clamped to the surface). Returns the position
+   after it, or pos if there was none. */
+static int
+gfx_rects_trailer(const unsigned char *d, int avail, int pos,
+                  unsigned int want_magic, int width, int height,
+                  struct xrdp_egfx_rect **rects, int *num_rects)
+{
+    const unsigned char *t;
+    unsigned int magic;
+    unsigned int count;
+    unsigned int ri;
+    struct xrdp_egfx_rect *r;
+    int n = 0;
+
+    *rects = NULL;
+    *num_rects = 0;
+    if (avail - pos < XH_AVC444_RECTS_HEAD_BYTES)
+    {
+        return pos;
+    }
+    t = d + pos;
+    magic = t[0] | (t[1] << 8) | (t[2] << 16) | ((unsigned int) t[3] << 24);
+    count = t[4] | (t[5] << 8) | (t[6] << 16) | ((unsigned int) t[7] << 24);
+    if (magic != want_magic || count < 1 || count > XH_AVC444_RECTS_MAX ||
+            (int) (XH_AVC444_RECTS_HEAD_BYTES + count * 8) > avail - pos)
+    {
+        return pos;
+    }
+    r = g_new0(struct xrdp_egfx_rect, count);
+    if (r == NULL)
+    {
+        return pos;
+    }
+    t += XH_AVC444_RECTS_HEAD_BYTES;
+    for (ri = 0; ri < count; ri++, t += 8)
+    {
+        /* From shared memory: clamp. */
+        int x1 = MIN(t[0] | (t[1] << 8), width);
+        int y1 = MIN(t[2] | (t[3] << 8), height);
+        int x2 = MIN(t[4] | (t[5] << 8), width);
+        int y2 = MIN(t[6] | (t[7] << 8), height);
+
+        if ((x2 > x1) && (y2 > y1))
+        {
+            r[n].x1 = x1;
+            r[n].y1 = y1;
+            r[n].x2 = x2;
+            r[n].y2 = y2;
+            n++;
+        }
+    }
+    if (n == 0)
+    {
+        g_free(r);
+        r = NULL;
+    }
+    *rects = r;
+    *num_rects = n;
+    return pos + XH_AVC444_RECTS_HEAD_BYTES + count * 8;
+}
+
+/*****************************************************************************/
 static struct stream *
 gfx_wiretosurface1(struct xrdp_encoder *self,
                    struct xrdp_egfx_bulk *bulk, struct stream *in_s,
@@ -1033,6 +1096,7 @@ gfx_wiretosurface1(struct xrdp_encoder *self,
            case the aux declares the whole frame. */
         int have_aux_rect = 0;
         struct xrdp_egfx_rect wire_aux_rect;
+        int trailer_pos = 8 + len1 + len2;
 
         g_memset(&wire_aux_rect, 0, sizeof(wire_aux_rect));
         if (len2 > 0)
@@ -1071,13 +1135,34 @@ gfx_wiretosurface1(struct xrdp_encoder *self,
                         wire_aux_rect.y2 = ry2;
                         have_aux_rect = 1;
                     }
+                    trailer_pos = used + XH_AVC444_AUX_RECT_BYTES;
                 }
             }
+        }
+        /* Optional trailers: the rects that actually changed (the helper's
+           damage detection, see xrdp_accel_assist.h), declared for both
+           views in place of xorgxrdp's damage, so repainted but unchanged
+           areas are not shown at 4:2:0 again; then the rects the aux view
+           covers, when it covers less than that. */
+        struct xrdp_egfx_rect *chg_rects = NULL;
+        int num_chg_rects = 0;
+        struct xrdp_egfx_rect *auxl_rects = NULL;
+        int num_auxl_rects = 0;
+
+        trailer_pos = gfx_rects_trailer(d, avail, trailer_pos,
+                                        XH_AVC444_RECTS_MAGIC, width, height,
+                                        &chg_rects, &num_chg_rects);
+        if (chg_rects != NULL && len2 > 0)
+        {
+            gfx_rects_trailer(d, avail, trailer_pos,
+                              XH_AVC444_AUX_RECTS_MAGIC, width, height,
+                              &auxl_rects, &num_auxl_rects);
         }
         char *info_p = s->p;
         char *str1_start;
         char *save_p;
         int size1;
+        int lc;
         int emitted_rects = 0;
         int emitted_aux_rects = 0;
 
@@ -1110,10 +1195,39 @@ gfx_wiretosurface1(struct xrdp_encoder *self,
             full.y2 = height;
             meta_rects = d_rects;
             meta_num_rects = num_rects_d;
+            if (chg_rects != NULL)
+            {
+                meta_rects = chg_rects;
+                meta_num_rects = num_chg_rects;
+            }
             align_y = (codec_id == XR_RDPGFX_CODECID_AVC444V2) ? 2 : 16;
+            lc = (len2 == 0) ? 1 : (len1 == 0) ? 2 : 0;
 
             out_uint32_le(s, 0); /* cbAvc420EncodedBitstreamInfo, backfilled */
             str1_start = s->p;
+            if (lc == 2)
+            {
+                /* The aux view alone (a catch-up after motion): it takes
+                   the first bitstream's place, MS-RDPEGFX 2.2.4.5. */
+                meta_rects = (auxl_rects != NULL) ? auxl_rects : meta_rects;
+                meta_num_rects = (auxl_rects != NULL) ? num_auxl_rects
+                                 : meta_num_rects;
+                if (auxl_rects == NULL && have_aux_rect)
+                {
+                    meta_rects = &wire_aux_rect;
+                    meta_num_rects = 1;
+                }
+                else if (auxl_rects == NULL &&
+                         self->avc444_luma_only_run[mon_index] > 0)
+                {
+                    meta_rects = &full;
+                    meta_num_rects = 1;
+                }
+                self->avc444_luma_only_run[mon_index] = 0;
+                s1 = s2;
+                len1 = len2;
+                len2 = 0;
+            }
             if (out_RFX_AVC420_METABLOCK(&dst_rect, s, meta_rects,
                                          meta_num_rects, 4, align_y,
                                          &emitted_rects) != 0 ||
@@ -1122,17 +1236,29 @@ gfx_wiretosurface1(struct xrdp_encoder *self,
                 g_free(s->data);
                 g_free(c_rects);
                 g_free(d_rects);
+                g_free(chg_rects);
+                g_free(auxl_rects);
                 g_free(crects);
                 return NULL;
             }
             out_uint8a(s, s1, len1);
             size1 = (int) (s->p - str1_start);
-            if (len2 > 0)
+            if (lc == 2)
+            {
+                emitted_aux_rects = emitted_rects;
+            }
+            else if (len2 > 0)
             {
                 struct xrdp_egfx_rect *aux_rects = meta_rects;
                 int aux_num_rects = meta_num_rects;
 
-                if (have_aux_rect)
+                if (auxl_rects != NULL)
+                {
+                    /* The cells the helper rendered the aux view over. */
+                    aux_rects = auxl_rects;
+                    aux_num_rects = num_auxl_rects;
+                }
+                else if (have_aux_rect)
                 {
                     /* Exactly what the helper rendered. */
                     aux_rects = &wire_aux_rect;
@@ -1152,6 +1278,8 @@ gfx_wiretosurface1(struct xrdp_encoder *self,
                     g_free(s->data);
                     g_free(c_rects);
                     g_free(d_rects);
+                    g_free(chg_rects);
+                    g_free(auxl_rects);
                     g_free(crects);
                     return NULL;
                 }
@@ -1163,16 +1291,22 @@ gfx_wiretosurface1(struct xrdp_encoder *self,
             }
         }
         /* cbAvc420EncodedBitstreamInfo: LC in bits 30-31, and in bits 0-29
-           the size of metablock1 plus bitstream1. For LC=1 nothing follows
-           bitstream1. */
+           the size of metablock1 plus bitstream1. For LC=1 and LC=2 nothing
+           follows bitstream1. */
         save_p = s->p;
         s->p = info_p;
-        out_uint32_le(s, (((unsigned int) (len2 > 0 ? 0 : 1)) << 30) |
-                      (((unsigned int) size1) & 0x3FFFFFFF));
+        /* cbAvc420EncodedBitstream1 counts a YUV420 (main) frame only:
+           for LC=2 it MUST be zero (MS-RDPEGFX 2.2.4.5), and the Chroma420
+           frame runs to the end. mstsc drops the connection otherwise;
+           FreeRDP reads the size only for LC=0. */
+        out_uint32_le(s, (((unsigned int) lc) << 30) |
+                      (lc == 2 ? 0 : (((unsigned int) size1) & 0x3FFFFFFF)));
         s->p = save_p;
 
         g_free(c_rects);
         g_free(d_rects);
+        g_free(chg_rects);
+        g_free(auxl_rects);
         s_mark_end(s);
         bitmap_data_length = (int) (s->end - s->data);
         if (self->frame_log)
@@ -1180,7 +1314,7 @@ gfx_wiretosurface1(struct xrdp_encoder *self,
             LOG(LOG_LEVEL_INFO, "gfx_wiretosurface1: AVC444 codec_id 0x%4.4x "
                 "LC %d len1 %d len2 %d size1(bs1+meta) %d total %d "
                 "rects %d/%d aux_rects %d pack %d ms",
-                codec_id, len2 > 0 ? 0 : 1, len1, len2, size1,
+                codec_id, lc, len1, len2, size1,
                 bitmap_data_length, emitted_rects, num_rects_d,
                 emitted_aux_rects,
                 (int) (g_get_elapsed_ms() - t_pack));
