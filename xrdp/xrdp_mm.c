@@ -1503,10 +1503,12 @@ xrdp_mm_egfx_frame_ack(void *user, uint32_t queue_depth, int frame_id,
         /* frame acks can come out of order so ignore older one */
         encoder->frame_id_client = MAX(frame_id, encoder->frame_id_client);
     }
-    if (frame_id > 0)
+    if (frame_id > 0 && frame_id <= encoder->frame_id_server)
     {
         /* The client's own latency for the module; excludes xorgxrdp's
-           capture interval. */
+           capture interval. Only for a frame that was sent: a client that
+           acks everything with a larger id would read a stale slot, and
+           hand the pacing loop a round trip of minutes. */
         unsigned int sent = encoder->frame_sent_ms[frame_id & 63];
 
         if (sent != 0)
@@ -1514,7 +1516,8 @@ xrdp_mm_egfx_frame_ack(void *user, uint32_t queue_depth, int frame_id,
             encoder->last_rtt_ms = (int) (g_get_elapsed_ms() - sent);
         }
     }
-    if (encoder->frame_log && frame_id > 0)
+    if (encoder->frame_log && frame_id > 0 &&
+            frame_id <= encoder->frame_id_server)
     {
         /* The client's reported queue depth: whether it is keeping up. */
         int rtt = (int) (g_get_elapsed_ms() -
