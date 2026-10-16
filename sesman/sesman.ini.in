@@ -310,6 +310,14 @@ PULSE_SCRIPT=@sesmansysconfdir@/pulse/default.pa
 ; view is a reasonable desktop setting where bandwidth allows.
 ;XRDP_VAAPI_QP=28
 ;XRDP_VAAPI_AUX_QP=18
+; Chroma quantiser offset per view, -12 to 12, 0 by default (test). With
+; AVC444 the client rebuilds one pixel in four from four times the main view's
+; chroma, so main-view chroma errors show there four times over, as single
+; dark or colored dots on subpixel-antialiased text. -6 for the main view
+; removed them on a test page for about 8% more bytes on a full update; the
+; aux view needs no offset.
+;XRDP_VAAPI_CHROMA_QP_OFFSET=-6
+;XRDP_VAAPI_AUX_CHROMA_QP_OFFSET=0
 ; Rate control. By default the encoder runs at constant QP, which holds
 ; quality steady but leaves frame size unbounded -- a high-motion frame can be
 ; an order of magnitude larger than a still one. Setting a bitrate in kbit/s
