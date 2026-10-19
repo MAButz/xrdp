@@ -131,6 +131,7 @@ struct enc_info
     int cur_pps;         /* PPS of the picture being encoded: 1 for an aux
                             view with its own chroma offset, else 0 */
     int deblock_view[2]; /* 0 = disable_deblocking_filter_idc 1 */
+    int deblock_off_view[2]; /* slice_alpha_c0/beta_offset_div2, -6..6 */
     /* Constant QP unless XRDP_VAAPI_BITRATE (kbit/s) selects VBR. */
     int rc_mode;         /* VA_RC_CQP or VA_RC_VBR */
     int bitrate_kbps;    /* XRDP_VAAPI_BITRATE, 0 = CQP */
@@ -474,7 +475,8 @@ build_pps(unsigned char *out, struct enc_info *ei, int pps_id, int coff)
 static int
 build_slice_header(unsigned char *out, struct enc_info *ei, int is_idr,
                    int is_ltr, int slice_type, int nref,
-                   int qp, int deblock_idc, int idr_pic_id,
+                   int qp, int deblock_idc, int deblock_off,
+                   int idr_pic_id,
                    int ref_lt_idx, int cur_lt_idx, int send_lt_max)
 {
     unsigned char rbsp[64];
@@ -549,8 +551,8 @@ build_slice_header(unsigned char *out, struct enc_info *ei, int is_idr,
     bs_ue(&b, deblock_idc);            /* disable_deblocking_filter_idc */
     if (deblock_idc != 1)
     {
-        bs_se(&b, 0);                  /* slice_alpha_c0_offset_div2 */
-        bs_se(&b, 0);                  /* slice_beta_offset_div2 */
+        bs_se(&b, deblock_off);        /* slice_alpha_c0_offset_div2 */
+        bs_se(&b, deblock_off);        /* slice_beta_offset_div2 */
     }
 
     /* Emulation prevention is left to the driver (has_emulation_bytes 0),
@@ -1293,6 +1295,27 @@ xrdp_accel_assist_vaapi_create_encoder(int width, int height, int nviews,
     lei->deblock_view[0] = 1;
     lei->deblock_view[1] = xrdp_accel_assist_x11_encoder_avc444_v2();
 
+    /* Main-view deblocking strength. At intra macroblock edges the strong
+       filter also changes the third pixel from the edge, which darkens the
+       white pixel next to a 1-pixel black line: grayscale dark specks and
+       grey halo columns along table borders, at any QP. An offset of -6
+       (alpha and beta both) removes them at QP 26 and keeps about half the
+       smoothing at high QP; bytes are unchanged. */
+    {
+        const char *d = g_getenv("XRDP_VAAPI_DEBLOCK_OFFSET");
+
+        lei->deblock_off_view[0] = (d != NULL) ? g_atoi(d) : 0;
+        lei->deblock_off_view[1] = 0;
+        if (lei->deblock_off_view[0] < -6)
+        {
+            lei->deblock_off_view[0] = -6;
+        }
+        if (lei->deblock_off_view[0] > 6)
+        {
+            lei->deblock_off_view[0] = 6;
+        }
+    }
+
     /* Chroma QP offsets, per view. The client rebuilds one pixel in four
        of AVC444 as four times the main view's 4:2:0 chroma minus three aux
        samples, so a chroma coding error in the main view shows up to four
@@ -1335,11 +1358,12 @@ xrdp_accel_assist_vaapi_create_encoder(int width, int height, int nviews,
        the spare reference slot; see xrdp_accel_assist_vaapi_num_ref(). */
 
     LOG(LOG_LEVEL_INFO, "vaapi: encoder %dx%d, %d view(s), QP %d/%d, "
-        "chroma QP offset %d/%d, deblock %d/%d, rc %s, bitrate %d kbit/s, "
-        "level %d",
+        "chroma QP offset %d/%d, deblock %d/%d offset %d/%d, rc %s, "
+        "bitrate %d kbit/s, level %d",
         width, height, lei->nviews, lei->qp_view[0], lei->qp_view[1],
         lei->chroma_qp_view[0], lei->chroma_qp_view[1],
         lei->deblock_view[0], lei->deblock_view[1],
+        lei->deblock_off_view[0], lei->deblock_off_view[1],
         lei->rc_mode == VA_RC_CQP ? "CQP" : "VBR",
         lei->bitrate_kbps, h264_level_for(width, height));
 
@@ -2078,13 +2102,13 @@ vaapi_submit(struct enc_info *ei, void *cdata, int *cdata_bytes,
     slice.cabac_init_idc = 0;
     slice.slice_qp_delta = qp - ei->qp_view[0];
     slice.disable_deblocking_filter_idc = ei->deblock_view[view] ? 0 : 1;
-    slice.slice_alpha_c0_offset_div2 = 0;
-    slice.slice_beta_offset_div2 = 0;
+    slice.slice_alpha_c0_offset_div2 = ei->deblock_off_view[view];
+    slice.slice_beta_offset_div2 = ei->deblock_off_view[view];
     slice.direct_spatial_mv_pred_flag = 0;
     /* Must be rendered before the slice parameter buffer. */
     sh_bits = build_slice_header(sh, ei, is_idr, is_ltr, slice.slice_type,
                                  nref, qp, slice.disable_deblocking_filter_idc,
-                                 idr_id_used, ref_lt_idx, cur_lt_idx,
+                                 ei->deblock_off_view[view], idr_id_used, ref_lt_idx, cur_lt_idx,
                                  send_lt_max);
     if (render_packed_bits(ei->context, VAEncPackedHeaderSlice, sh,
                            sh_bits, 0, track, &ntrack) != 0)
