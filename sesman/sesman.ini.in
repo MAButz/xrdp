@@ -321,6 +321,12 @@ PULSE_SCRIPT=@sesmansysconfdir@/pulse/default.pa
 ; aux view needs no offset.
 ;XRDP_VAAPI_CHROMA_QP_OFFSET=-6
 ;XRDP_VAAPI_AUX_CHROMA_QP_OFFSET=0
+; Main-view deblocking strength, -6 (weakest) to 6, 0 by default (test). The
+; filter darkens the white pixel next to a 1-pixel black line at macroblock
+; edges: grayscale dark specks and grey columns along table borders. -6
+; removed them on a test page at QP 26 for the same bytes, and keeps about
+; half the filter's smoothing on video at high QP.
+;XRDP_VAAPI_DEBLOCK_OFFSET=-6
 ; Rate control. By default the encoder runs at constant QP, which holds
 ; quality steady but leaves frame size unbounded -- a high-motion frame can be
 ; an order of magnitude larger than a still one. Setting a bitrate in kbit/s
