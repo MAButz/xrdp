@@ -1299,12 +1299,12 @@ xrdp_accel_assist_vaapi_create_encoder(int width, int height, int nviews,
        filter also changes the third pixel from the edge, which darkens the
        white pixel next to a 1-pixel black line: grayscale dark specks and
        grey halo columns along table borders, at any QP. An offset of -6
-       (alpha and beta both) removes them at QP 26 and keeps about half the
-       smoothing at high QP; bytes are unchanged. */
+       (alpha and beta both), the default, removes them at QP 26 and keeps
+       about half the smoothing at high QP; bytes are unchanged. */
     {
         const char *d = g_getenv("XRDP_VAAPI_DEBLOCK_OFFSET");
 
-        lei->deblock_off_view[0] = (d != NULL) ? g_atoi(d) : 0;
+        lei->deblock_off_view[0] = (d != NULL) ? g_atoi(d) : -6;
         lei->deblock_off_view[1] = 0;
         if (lei->deblock_off_view[0] < -6)
         {
